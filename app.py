@@ -226,8 +226,8 @@ def fetch_news_rss(query):
     return feed.entries[:5]
 
 def analyze_sentiment(title):
-    pos_words = ['最高益', '増益', '急騰', 'ストップ高', '続伸', '好調', '買われる', '上方修正', '増配']
-    neg_words = ['減益', '赤字', '急落', 'ストップ安', '続落', '不振', '売られる', '下方修正', '減配']
+    pos_words = ['最高益', '増益', '急騰', 'ストップ高', '続伸', '好調', '買われる', '上方修正', '増配', '自社株買い', '提携']
+    neg_words = ['減益', '赤字', '急落', 'ストップ安', '続落', '不振', '売られる', '下方修正', '減配', '不正', '懸念', '提訴']
     score = 0
     if any(w in title for w in pos_words): score = 1
     if any(w in title for w in neg_words): score = -1
@@ -422,68 +422,110 @@ def render_news(df_all):
     st.info("💡 ニュースはGoogle News RSSを利用して取得しています。")
 
 def render_ai_advice(df_all):
-    st.header("🤖 AIポートフォリオ診断")
-    st.caption("※ルールベースロジックによる自動分析結果です。")
-    
-    # データの準備
+    st.header("🤖 AIポートフォリオ診断 (Pro)")
+    st.info("あなたの資産状況と最新のニュースを照らし合わせ、プロのアナリスト視点で具体的なアドバイスを行います。")
+
+    # データ準備
     total_assets = df_all['評価額'].sum()
-    profit_rate = (df_all['含み損益(税引前)'].sum() / total_assets * 100) if total_assets > 0 else 0
+    stock_df = df_all[df_all['資産クラス'] == '個別株']
+    top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(3) # 上位3銘柄を重点分析
     
-    # 詳細区分
-    class_group = df_all.groupby('詳細区分')['評価額'].sum() / total_assets * 100
-    
-    # 銘柄集中度
-    top_stock = df_all.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(1)
-    top_stock_name = top_stock.index[0]
-    top_stock_ratio = (top_stock.values[0] / total_assets * 100)
-    
-    # 配当利回り
-    df_div_calc = df_all.copy()
-    df_div_calc['年間配当'] = df_div_calc['評価額'] * (df_div_calc['予想利回り(%)'] / 100)
-    portfolio_yield = (df_div_calc['年間配当'].sum() / total_assets * 100) if total_assets > 0 else 0
+    # --- 1. 健康診断レポート (Good / Bad) ---
+    st.subheader("1. 資産健康診断")
+    c_good, c_bad = st.columns(2)
 
-    st.markdown("### 📊 診断レポート")
-    
-    # 1. 資産配分（アセットアロケーション）
-    with st.chat_message("assistant", avatar="🤖"):
-        st.write("#### 1. 資産配分について")
-        
-        idx_ratio = class_group.get('インデックス投信', 0)
-        stock_ratio = class_group.get('個別株', 0)
-        
-        if idx_ratio > 70:
-            st.write(f"✅ **インデックス投信が主体の堅実な運用です（{idx_ratio:.1f}%）。** 長期的な資産形成に適した構成と言えます。")
-        elif stock_ratio > 60:
-            st.write(f"⚠️ **個別株の比率が高めです（{stock_ratio:.1f}%）。** 市場平均を上回るリターンが狙えますが、ボラティリティ（価格変動）も大きくなる傾向があります。")
+    with c_good:
+        st.success("##### 👍 良い点 (Strengths)")
+        # 配当利回りチェック
+        div_yield = (df_all['評価額'] * df_all['予想利回り(%)']).sum() / total_assets
+        if div_yield > 2.5:
+            st.markdown(f"- **インカムゲインが太い**: 平均利回りが {div_yield:.1f}% あり、配当再投資による複利効果が期待できます。")
         else:
-            st.write("✅ **バランスの取れた資産配分です。** 特定の資産クラスに偏りすぎず、分散が効いています。")
+            st.markdown("- **キャピタルゲイン重視**: 配当よりも値上がり益を狙える構成です。資産拡大期に適しています。")
+        
+        # NISA活用度チェック
+        nisa_assets = df_all[df_all['口座区分'].str.contains('NISA')]['評価額'].sum()
+        nisa_ratio = (nisa_assets / total_assets) * 100
+        if nisa_ratio > 40:
+             st.markdown(f"- **NISA活用が優秀**: 資産の {nisa_ratio:.1f}% が非課税口座にあり、税制メリットを最大限享受できています。")
+    
+    with c_bad:
+        st.error("##### 👎 懸念点 (Weaknesses)")
+        # 集中投資チェック
+        if not top_stocks.empty:
+            top_stock_ratio = (top_stocks.iloc[0] / total_assets) * 100
+            if top_stock_ratio > 20:
+                st.markdown(f"- **銘柄への過度な依存**: 「{top_stocks.index[0]}」1銘柄で資産の {top_stock_ratio:.1f}% を占めています。この銘柄が急落した際のダメージが甚大です。")
+            else:
+                st.markdown("- **大きな懸念なし**: 特定銘柄への過度な集中は見られません。")
+        
+        # 資産クラスの偏り
+        bond_gold_ratio = df_all[df_all['詳細区分'].isin(['債券', 'ゴールド'])]['評価額'].sum() / total_assets * 100
+        if bond_gold_ratio < 5:
+            st.markdown("- **守りが手薄**: 暴落時にクッションとなる「債券」や「ゴールド」がほとんどありません。市場全体の暴落時に資産が大きく目減りするリスクがあります。")
+
+    st.markdown("---")
+
+    # --- 2. ニュース連動型・緊急アドバイス ---
+    st.subheader("2. 警戒すべきニュースと具体的対策")
+    st.caption("主力銘柄に関する直近のネガティブニュースを検知し、立ち回りを提案します。")
+
+    if top_stocks.empty:
+        st.write("個別株の保有がないため、この分析はスキップします。")
+    else:
+        found_alert = False
+        for stock_name, val in top_stocks.items():
+            search_query = stock_name.replace('ホールディングス', 'HD').split(' ')[0]
+            query = f"{search_query} 株価 ニュース"
+            entries = fetch_news_rss(query)
             
-        if class_group.get('債券', 0) < 5 and class_group.get('ゴールド', 0) < 5:
-            st.write("💡 **アドバイス**: 債券やゴールドなどの「守りの資産」を少し組み入れると、暴落時のクッション効果が期待できます。")
-
-    # 2. 集中投資リスク
-    with st.chat_message("assistant", avatar="🤖"):
-        st.write("#### 2. 集中投資リスク")
-        st.write(f"現在の最大保有銘柄は **「{top_stock_name}」** で、全体の **{top_stock_ratio:.1f}%** を占めています。")
+            # センチメント分析とアドバイス生成
+            neg_news = []
+            for entry in entries:
+                if analyze_sentiment(entry.title) == -1:
+                    neg_news.append(entry)
+            
+            if neg_news:
+                found_alert = True
+                with st.expander(f"⚠️ **緊急: {stock_name} に警戒シグナル**", expanded=True):
+                    for news in neg_news:
+                        st.markdown(f"- 📰 [{news.title}]({news.link})")
+                    
+                    st.markdown("""
+                    **【プロのアドバイス】**
+                    ネガティブなニュースが出ています。以下の基準で冷静に対処してください：
+                    
+                    1.  **「ストーリー」は崩れたか？**:
+                        * 単なる「地合いの悪化」や「一時的な減益」なら、**ホールド（または押し目買い）**が正解の可能性が高いです。狼狽売りは厳禁です。
+                        * もし「粉飾決算」「強力な競合の出現」「ビジネスモデルの崩壊」なら、**含み損があっても即座に売却（損切り）**することを推奨します。
+                    2.  **損切りラインの徹底**:
+                        * まだ迷う場合は、「買値から-10%」または「直近安値を割ったら」など、**逆指値（ストップロス）**を必ず設定してください。
+                    """)
         
-        if top_stock_ratio > 25:
-            st.error(f"⚠️ **集中リスク警告**: 1つの銘柄がポートフォリオの4分の1を超えています。この銘柄が急落すると資産全体へのダメージが大きいため、リバランスを検討しても良いかもしれません。")
-        elif top_stock_ratio > 15:
-            st.warning(f"⚠️ **やや集中しています**: 特定銘柄への依存度が少し高めです。追加投資は他の銘柄やインデックスに行うことを推奨します。")
-        else:
-            st.success(f"✅ **良好な分散状況**: 特定の銘柄への過度な依存は見られません。")
+        if not found_alert:
+            st.info("✅ 現在、主力銘柄に関して、直ちに売却を迫るような致命的なニュースは見当たりません。上昇トレンドであれば利益を伸ばし（トレーリングストップ活用）、静観するのが賢明です。")
 
-    # 3. インカムゲイン（配当）
-    with st.chat_message("assistant", avatar="🤖"):
-        st.write("#### 3. 配当利回り")
-        st.write(f"ポートフォリオ全体の予想配当利回りは **{portfolio_yield:.2f}%** です。")
+    st.markdown("---")
+
+    # --- 3. 今後の処方箋 (Next Action) ---
+    st.subheader("3. 今後のアクションプラン")
+    
+    # 現金比率がないので、アセットアロケーションに基づく提案
+    with st.chat_message("assistant", avatar="🧑‍💼"):
+        st.write("ポートフォリオの安定感を高めるために、次の買い付けでは以下を検討してください：")
         
-        if portfolio_yield < 1.0:
-            st.write("📉 配当は少なめですが、これは「S&P500」や「オルカン」などの再投資型ファンドが多い場合に一般的です。資産拡大期であれば問題ありません。")
-        elif portfolio_yield > 3.5:
-            st.write("💰 **高配当ポートフォリオ**と言えます。インカムゲイン重視の戦略が機能しています。ただし、配当が高いだけで株価が下がっている「罠銘柄」が含まれていないか定期的にチェックしましょう。")
-        else:
-            st.write("⚖️ キャピタルゲイン（値上がり益）とインカムゲイン（配当）のバランスが取れた水準です。")
+        recommendations = []
+        if bond_gold_ratio < 10:
+            recommendations.append("**ゴールド（金）または債券ETF（AGG/BND）**: 株式との相関が低い資産を10%程度まで増やすと、資産全体の変動率（リスク）を下げられます。")
+        
+        if div_yield < 1.5:
+             recommendations.append("**高配当株（VYM/HDVなど）**: 下落相場でも配当が心の支えになります。少しインカムゲインを強化しても良いでしょう。")
+        
+        if not recommendations:
+            recommendations.append("**現状維持（オルカン/S&P500積立継続）**: 非常にバランスが良い状態です。このまま積立を継続し、余計な売買をしないことが最高のリターンを生みます。")
+            
+        for rec in recommendations:
+            st.markdown(f"- {rec}")
 
 # --- メイン処理 ---
 st.sidebar.title("もりかわ株管理APP")
