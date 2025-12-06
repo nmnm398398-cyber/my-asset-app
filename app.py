@@ -149,7 +149,7 @@ def load_rakuten_advanced(text_data):
     return df
 
 def load_sbi_advanced(text_data):
-    """SBI証券のCSV解析"""
+    """SBI証券のCSV解析（修正版：ブロック構造対応強化）"""
     data_rows = []
     lines = text_data.splitlines()
     reader = csv.reader(lines)
@@ -164,23 +164,43 @@ def load_sbi_advanced(text_data):
         if "合計" in line_str:
             continue
         
-        # セクションヘッダーまたはテーブルヘッダーの判定
-        if "株式" in line_str or "投資信託" in line_str:
-            if "銘柄" in line_str or "ファンド名" in line_str:
-                header_map = {col: idx for idx, col in enumerate(row)}
-            else:
-                # セクション名を更新（例：株式（旧NISA預り））
+        # 1. セクション（口座・商品種別）の判定
+        if ("株式" in line_str or "投資信託" in line_str) and \
+           ("銘柄" not in line_str and "ファンド名" not in line_str):
                 current_section = line_str.replace('"', '').replace(',', '')
+                continue
 
-        name_idx = header_map.get('銘柄名称') or header_map.get('ファンド名') or header_map.get('銘柄コード/銘柄名')
-        val_idx = header_map.get('評価額') or header_map.get('評価金額')
-        pl_idx = header_map.get('評価損益') or header_map.get('含み損益')
+        # 2. ヘッダー行の判定
+        if "銘柄" in line_str or "ファンド名" in line_str:
+            header_map = {col: idx for idx, col in enumerate(row)}
+            continue
+
+        # 3. データ行の解析
+        # ※ここを修正：0番目の列（ファンド名など）を確実に拾えるようにロジック変更
+        name_idx = None
+        for k in ['銘柄名称', 'ファンド名', '銘柄コード/銘柄名']:
+            if k in header_map:
+                name_idx = header_map[k]
+                break
+                
+        val_idx = None
+        for k in ['評価額', '評価金額']:
+             if k in header_map:
+                 val_idx = header_map[k]
+                 break
+                 
+        pl_idx = None
+        for k in ['評価損益', '含み損益']:
+            if k in header_map:
+                pl_idx = header_map[k]
+                break
         
+        # 必要な列インデックスが見つかっており、行の長さが十分にある場合
         if name_idx is not None and val_idx is not None and len(row) > max(name_idx, val_idx):
             try:
                 val_check = clean_currency(row[val_idx])
-                # 明らかにデータ行でないものを除外
-                if val_check == 0 and "円" not in str(row[val_idx]) and row[val_idx] != "0":
+                # 明らかにデータ行でないもの（0円かつゴミデータ）を除外
+                if val_check == 0 and "円" not in str(row[val_idx]) and str(row[val_idx]) != "0":
                    pass
                 else:
                     item = {}
@@ -188,9 +208,12 @@ def load_sbi_advanced(text_data):
                     item['評価額'] = val_check
                     item['評価損益'] = clean_currency(row[pl_idx]) if pl_idx is not None else 0
                     item['証券会社'] = 'SBI証券'
+                    
+                    # セクション情報から属性を付与
                     item['種別_raw'] = '投資信託' if '投資信託' in current_section else '株式'
                     item['口座区分_raw'] = current_section
                     item['口座区分'] = guess_account_type(current_section)
+                    
                     data_rows.append(item)
             except:
                 continue
