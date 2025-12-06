@@ -139,7 +139,9 @@ def guess_attributes(df):
     def get_class(row):
         name = normalize_text(row['銘柄名'])
         cat = normalize_text(row.get('種別_raw', ''))
+        # 明確に投資信託とわかるキーワード
         if "投資信託" in cat or "ファンド" in name: return "投資信託"
+        if "S&P500" in name or "全米" in name or "オルカン" in name: return "投資信託"
         return "個別株"
 
     def get_account(row):
@@ -357,60 +359,66 @@ def render_dashboard(df_all):
         st.plotly_chart(fig_div, use_container_width=True)
 
 def render_news(df_all):
-    st.header("📰 最新マーケットニュース")
-    st.caption("Googleニュースから最新情報を自動取得しています。")
+    st.header("📰 保有資産（個別株）に関するニュース")
+    st.caption("※投資信託（S&P500、オルカン等）は除外しています。")
 
-    # 1. 保有銘柄のニュース（重要度：評価額トップ5）
-    st.subheader("🔥 保有銘柄の最新ニュース")
+    # 1. 個別株フィルタリング
+    # 資産クラスが「個別株」のものだけを抽出
+    stock_df = df_all[df_all['資産クラス'] == '個別株']
     
-    # 評価額順にソートして上位を取得
-    top_stocks = df_all.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(5).index.tolist()
+    if stock_df.empty:
+        st.info("個別株（株式）のデータが見つかりませんでした。投資信託のみ保有している可能性があります。")
+        return
+
+    # 評価額順にソートして上位10銘柄を取得
+    top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(10).index.tolist()
     
+    st.markdown(f"**評価額上位の個別株（{len(top_stocks)}銘柄）をチェック中...**")
+    
+    # ニュース取得ループ
     for stock in top_stocks:
-        # クエリ調整（日本株か米国株かで検索ワードを工夫）
-        query = f"{stock} 株価 ニュース"
+        # 銘柄名が長すぎる場合や、余計な記号がある場合は少しクリーニング（Google検索精度向上のため）
+        search_query = stock.replace('ホールディングス', 'HD').split(' ')[0] # 簡易的な短縮
+        
+        # クエリ作成
+        query = f"{search_query} 株価 ニュース"
         entries = fetch_news_rss(query)
         
         if entries:
-            with st.expander(f"📌 {stock} 関連 ({len(entries)}件)", expanded=True):
+            # エキスパンダーで表示（デフォルトは閉じておくか、上位だけ開く）
+            with st.expander(f"📌 {stock}", expanded=True):
+                found_count = 0
                 for entry in entries:
+                    # センチメント分析
                     sentiment = analyze_sentiment(entry.title)
-                    icon = "🆕"
-                    if sentiment == 1: icon = "📈 【好材料?】"
-                    elif sentiment == -1: icon = "📉 【警戒】"
+                    icon = "📄"
+                    style_prefix = ""
                     
-                    st.markdown(f"**{icon} [{entry.title}]({entry.link})**")
-                    published = entry.get('published', '')[:16] # 日時を短く
+                    if sentiment == 1: 
+                        icon = "📈"
+                        style_prefix = ":green-background[好材料?]"
+                    elif sentiment == -1: 
+                        icon = "📉"
+                        style_prefix = ":red-background[警戒]"
+                    
+                    # ニュース表示
+                    published = entry.get('published', '')[:16]
+                    st.markdown(f"{icon} {style_prefix} **[{entry.title}]({entry.link})**")
                     st.caption(f"{entry.source.title} | {published}")
+                    found_count += 1
+                
+                if found_count == 0:
+                    st.caption("最近の関連ニュースは見つかりませんでした。")
 
     st.markdown("---")
-
-    # 2. その他のトピックス
-    col_jp, col_us, col_gl = st.columns(3)
-
-    with col_jp:
-        st.subheader("🇯🇵 日本株トピックス")
-        jp_entries = fetch_news_rss("日本株 市況")
-        for entry in jp_entries[:5]:
-            st.markdown(f"- [{entry.title}]({entry.link})")
-            
-    with col_us:
-        st.subheader("🇺🇸 米国株トピックス")
-        us_entries = fetch_news_rss("米国株 市況")
-        for entry in us_entries[:5]:
-            st.markdown(f"- [{entry.title}]({entry.link})")
-            
-    with col_gl:
-        st.subheader("🌍 世界経済トピックス")
-        gl_entries = fetch_news_rss("世界経済 ニュース")
-        for entry in gl_entries[:5]:
-            st.markdown(f"- [{entry.title}]({entry.link})")
+    st.info("💡 ニュースはGoogle News RSSを利用して取得しています。")
 
 # --- メイン処理 ---
 
 # サイドバー共通部分
 st.sidebar.title("もりかわ株管理APP")
-page = st.sidebar.radio("メニュー切り替え", ["📊 ダッシュボード", "📰 最新ニュース"], index=0)
+# メニュー名の変更
+page = st.sidebar.radio("メニュー切り替え", ["📊 保有資産内訳", "📰 保有資産に関するニュース"], index=0)
 st.sidebar.markdown("---")
 st.sidebar.header("📂 データ取り込み")
 uploaded_files = st.sidebar.file_uploader("CSVをアップロード", type=['csv'], accept_multiple_files=True)
@@ -429,7 +437,7 @@ if uploaded_files:
         df_all = guess_attributes(df_all)
         
         # ページ切り替え
-        if page == "📊 ダッシュボード":
+        if page == "📊 保有資産内訳":
             render_dashboard(df_all)
         else:
             render_news(df_all)
