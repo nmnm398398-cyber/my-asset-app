@@ -136,7 +136,6 @@ def guess_attributes(df):
     def get_class(row):
         name = normalize_text(row['銘柄名'])
         cat = normalize_text(row.get('種別_raw', ''))
-        # 明確に投資信託とわかるキーワード
         if "投資信託" in cat or "ファンド" in name: return "投資信託"
         if "S&P500" in name or "全米" in name or "オルカン" in name: return "投資信託"
         return "個別株"
@@ -184,20 +183,13 @@ def guess_attributes(df):
         if any(x in name for x in ["P&G", "COCA", "J&J", "MCDONALD"]): return "米国ディフェンシブ"
         return "その他事業"
     
-    # --- 新しいカスタム分類ロジック ---
     def get_custom_category(row):
         name = normalize_text(row['銘柄名'])
         ac = get_class(row)
-        
-        # 1. 個別株
-        if ac == "個別株":
-            return "個別株"
-        
-        # 2. 投資信託の分類
+        if ac == "個別株": return "個別株"
         if any(x in name for x in ["ゴールド", "金", "GOLD"]): return "ゴールド"
         if any(x in name for x in ["債券", "BND", "AGG"]): return "債券"
         if any(x in name for x in ["S&P500", "全米", "オルカン", "全世界", "TOPIX", "日経", "NASDAQ", "先進国", "VTI", "VOO"]): return "インデックス投信"
-        
         return "その他投信"
 
     def get_div_months(row):
@@ -212,8 +204,6 @@ def guess_attributes(df):
     df['予想利回り(%)'] = df.apply(get_yield, axis=1)
     df['セクター'] = df.apply(get_sector, axis=1)
     df['配当月'] = df.apply(get_div_months, axis=1)
-    
-    # 新しい分類カラムを追加
     df['詳細区分'] = df.apply(get_custom_category, axis=1)
     
     df['取得額'] = df['評価額'] - df['評価損益']
@@ -228,19 +218,16 @@ def guess_attributes(df):
     return df
 
 # --- ニュース取得関数 ---
-@st.cache_data(ttl=3600) # 1時間キャッシュ
+@st.cache_data(ttl=3600)
 def fetch_news_rss(query):
-    """GoogleニュースRSSを取得"""
     encoded_query = urllib.parse.quote(query)
     url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ja&gl=JP&ceid=JP:ja"
     feed = feedparser.parse(url)
-    return feed.entries[:5] # 最新5件
+    return feed.entries[:5]
 
 def analyze_sentiment(title):
-    """簡易的なセンチメント判定"""
     pos_words = ['最高益', '増益', '急騰', 'ストップ高', '続伸', '好調', '買われる', '上方修正', '増配']
     neg_words = ['減益', '赤字', '急落', 'ストップ安', '続落', '不振', '売られる', '下方修正', '減配']
-    
     score = 0
     if any(w in title for w in pos_words): score = 1
     if any(w in title for w in neg_words): score = -1
@@ -265,10 +252,7 @@ def render_dashboard(df_all):
             df_all[editor_cols],
             column_config={
                 "分析対象": st.column_config.CheckboxColumn(default=True),
-                "詳細区分": st.column_config.SelectboxColumn(
-                    options=["個別株", "インデックス投信", "ゴールド", "債券", "その他投信"],
-                    help="自動判定された区分です。必要に応じて修正してください。"
-                ),
+                "詳細区分": st.column_config.SelectboxColumn(options=["個別株", "インデックス投信", "ゴールド", "債券", "その他投信"]),
                 "評価額": st.column_config.NumberColumn(format="%d"),
                 "評価損益": st.column_config.NumberColumn(format="%d"),
                 "予想利回り(%)": st.column_config.NumberColumn(format="%.1f %%"),
@@ -280,7 +264,7 @@ def render_dashboard(df_all):
     
     df_filtered = df_all.iloc[edited_df.index].copy()
     df_filtered['分析対象'] = edited_df['分析対象']
-    df_filtered['詳細区分'] = edited_df['詳細区分'] # 編集内容を反映
+    df_filtered['詳細区分'] = edited_df['詳細区分']
     df_filtered['セクター'] = edited_df['セクター']
     df_filtered['予想利回り(%)'] = edited_df['予想利回り(%)']
     df_filtered = df_filtered[df_filtered['分析対象'] == True]
@@ -292,8 +276,6 @@ def render_dashboard(df_all):
     # --- 集計 ---
     total_val = df_filtered[selected_metric].sum()
     total_profit = df_filtered['含み損益(税引前)'].sum()
-    
-    # 証券会社別の集計 (selected_metricベース)
     rakuten_val = df_filtered[df_filtered['証券会社'] == '楽天証券'][selected_metric].sum()
     sbi_val = df_filtered[df_filtered['証券会社'] == 'SBI証券'][selected_metric].sum()
     
@@ -301,7 +283,6 @@ def render_dashboard(df_all):
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"合計 {selected_metric}", f"{total_val:,.0f} 円")
     c2.metric("含み益 (税引前)", f"{total_profit:,.0f} 円", delta_color="normal")
-    
     c3.metric(f"楽天証券 ({selected_metric})", f"{rakuten_val:,.0f} 円")
     c4.metric(f"SBI証券 ({selected_metric})", f"{sbi_val:,.0f} 円")
 
@@ -344,40 +325,27 @@ def render_dashboard(df_all):
             st.plotly_chart(fig2, use_container_width=True)
 
     with tab2:
-        # 新しいカスタム区分のグラフを追加
         st.subheader("💡 資産内訳（詳細区分）")
         col_new1, col_new2 = st.columns([1, 1])
         
         with col_new1:
-            # 詳細区分の円グラフ
             fig_custom = px.pie(
-                df_filtered, 
-                values=selected_metric, 
-                names='詳細区分', 
+                df_filtered, values=selected_metric, names='詳細区分', 
                 title="資産内訳 (個別株・インデックス投信・ゴールド・債券)",
                 hole=0.4,
                 color='詳細区分',
-                color_discrete_map={
-                    "個別株": "#1f77b4", # 青
-                    "インデックス投信": "#2ca02c", # 緑
-                    "ゴールド": "#ff7f0e", # オレンジ（金に近い色）
-                    "債券": "#d62728", # 赤
-                    "その他投信": "#7f7f7f" # グレー
-                }
+                color_discrete_map={"個別株": "#1f77b4", "インデックス投信": "#2ca02c", "ゴールド": "#ff7f0e", "債券": "#d62728", "その他投信": "#7f7f7f"}
             )
             fig_custom.update_traces(textinfo='percent+label', hovertemplate='%{label}: %{value:,.0f} 円')
             st.plotly_chart(fig_custom, use_container_width=True)
             
         with col_new2:
-            # 口座区分（既存）
             acc_grp = df_filtered.groupby('口座区分')[selected_metric].sum().reset_index()
             fig4 = px.bar(acc_grp, x='口座区分', y=selected_metric, color='口座区分', title="口座区分別残高")
             fig4 = update_layout_common(fig4)
             st.plotly_chart(fig4, use_container_width=True)
 
         st.markdown("---")
-        st.caption("以下は従来の資産クラス（個別株/投資信託）による内訳です。")
-        
         col_a, col_b = st.columns(2)
         with col_a:
             fig3 = px.bar(df_filtered, x='資産クラス', y=selected_metric, color='国・地域', title="資産クラス内訳")
@@ -393,15 +361,12 @@ def render_dashboard(df_all):
             yearly_div_amount = row['評価額'] * yearly_yield
             payment_months = row['配当月']
             if not payment_months: continue
-            
             amount_per_payment = yearly_div_amount / len(payment_months)
             for m in payment_months:
                 monthly_div[m] += amount_per_payment
 
         df_monthly = pd.DataFrame(list(monthly_div.items()), columns=['月', '配当金額'])
         total_year_div = df_monthly['配当金額'].sum()
-        
-        # 利回り計算（評価額ベース）
         total_assets_val = df_filtered['評価額'].sum()
         avg_yield_port = (total_year_div / total_assets_val * 100) if total_assets_val > 0 else 0
 
@@ -416,40 +381,30 @@ def render_dashboard(df_all):
 
 def render_news(df_all):
     st.header("📰 保有銘柄に関するニュース")
-    st.caption("※投資信託（S&P500、オルカン等）は除外しています。")
+    st.caption("※個別株のみを対象としています。")
 
-    # 1. 個別株フィルタリング
-    # 資産クラスが「個別株」のものだけを抽出
     stock_df = df_all[df_all['資産クラス'] == '個別株']
     
     if stock_df.empty:
-        st.info("個別株（株式）のデータが見つかりませんでした。投資信託のみ保有している可能性があります。")
+        st.info("個別株（株式）のデータが見つかりませんでした。")
         return
 
-    # 評価額順にソートして上位10銘柄を取得
     top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(10).index.tolist()
     
     st.markdown(f"**評価額上位の個別株（{len(top_stocks)}銘柄）をチェック中...**")
     
-    # ニュース取得ループ
     for stock in top_stocks:
-        # 銘柄名が長すぎる場合や、余計な記号がある場合は少しクリーニング
         search_query = stock.replace('ホールディングス', 'HD').split(' ')[0] 
-        
-        # クエリ作成
         query = f"{search_query} 株価 ニュース"
         entries = fetch_news_rss(query)
         
         if entries:
-            # エキスパンダーで表示
             with st.expander(f"📌 {stock}", expanded=True):
                 found_count = 0
                 for entry in entries:
-                    # センチメント分析
                     sentiment = analyze_sentiment(entry.title)
                     icon = "📄"
                     style_prefix = ""
-                    
                     if sentiment == 1: 
                         icon = "📈"
                         style_prefix = ":green-background[好材料?]"
@@ -457,24 +412,82 @@ def render_news(df_all):
                         icon = "📉"
                         style_prefix = ":red-background[警戒]"
                     
-                    # ニュース表示
                     published = entry.get('published', '')[:16]
                     st.markdown(f"{icon} {style_prefix} **[{entry.title}]({entry.link})**")
                     st.caption(f"{entry.source.title} | {published}")
                     found_count += 1
-                
                 if found_count == 0:
                     st.caption("最近の関連ニュースは見つかりませんでした。")
-
     st.markdown("---")
     st.info("💡 ニュースはGoogle News RSSを利用して取得しています。")
 
-# --- メイン処理 ---
+def render_ai_advice(df_all):
+    st.header("🤖 AIポートフォリオ診断")
+    st.caption("※ルールベースロジックによる自動分析結果です。")
+    
+    # データの準備
+    total_assets = df_all['評価額'].sum()
+    profit_rate = (df_all['含み損益(税引前)'].sum() / total_assets * 100) if total_assets > 0 else 0
+    
+    # 詳細区分
+    class_group = df_all.groupby('詳細区分')['評価額'].sum() / total_assets * 100
+    
+    # 銘柄集中度
+    top_stock = df_all.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(1)
+    top_stock_name = top_stock.index[0]
+    top_stock_ratio = (top_stock.values[0] / total_assets * 100)
+    
+    # 配当利回り
+    df_div_calc = df_all.copy()
+    df_div_calc['年間配当'] = df_div_calc['評価額'] * (df_div_calc['予想利回り(%)'] / 100)
+    portfolio_yield = (df_div_calc['年間配当'].sum() / total_assets * 100) if total_assets > 0 else 0
 
-# サイドバー共通部分
+    st.markdown("### 📊 診断レポート")
+    
+    # 1. 資産配分（アセットアロケーション）
+    with st.chat_message("assistant", avatar="🤖"):
+        st.write("#### 1. 資産配分について")
+        
+        idx_ratio = class_group.get('インデックス投信', 0)
+        stock_ratio = class_group.get('個別株', 0)
+        
+        if idx_ratio > 70:
+            st.write(f"✅ **インデックス投信が主体の堅実な運用です（{idx_ratio:.1f}%）。** 長期的な資産形成に適した構成と言えます。")
+        elif stock_ratio > 60:
+            st.write(f"⚠️ **個別株の比率が高めです（{stock_ratio:.1f}%）。** 市場平均を上回るリターンが狙えますが、ボラティリティ（価格変動）も大きくなる傾向があります。")
+        else:
+            st.write("✅ **バランスの取れた資産配分です。** 特定の資産クラスに偏りすぎず、分散が効いています。")
+            
+        if class_group.get('債券', 0) < 5 and class_group.get('ゴールド', 0) < 5:
+            st.write("💡 **アドバイス**: 債券やゴールドなどの「守りの資産」を少し組み入れると、暴落時のクッション効果が期待できます。")
+
+    # 2. 集中投資リスク
+    with st.chat_message("assistant", avatar="🤖"):
+        st.write("#### 2. 集中投資リスク")
+        st.write(f"現在の最大保有銘柄は **「{top_stock_name}」** で、全体の **{top_stock_ratio:.1f}%** を占めています。")
+        
+        if top_stock_ratio > 25:
+            st.error(f"⚠️ **集中リスク警告**: 1つの銘柄がポートフォリオの4分の1を超えています。この銘柄が急落すると資産全体へのダメージが大きいため、リバランスを検討しても良いかもしれません。")
+        elif top_stock_ratio > 15:
+            st.warning(f"⚠️ **やや集中しています**: 特定銘柄への依存度が少し高めです。追加投資は他の銘柄やインデックスに行うことを推奨します。")
+        else:
+            st.success(f"✅ **良好な分散状況**: 特定の銘柄への過度な依存は見られません。")
+
+    # 3. インカムゲイン（配当）
+    with st.chat_message("assistant", avatar="🤖"):
+        st.write("#### 3. 配当利回り")
+        st.write(f"ポートフォリオ全体の予想配当利回りは **{portfolio_yield:.2f}%** です。")
+        
+        if portfolio_yield < 1.0:
+            st.write("📉 配当は少なめですが、これは「S&P500」や「オルカン」などの再投資型ファンドが多い場合に一般的です。資産拡大期であれば問題ありません。")
+        elif portfolio_yield > 3.5:
+            st.write("💰 **高配当ポートフォリオ**と言えます。インカムゲイン重視の戦略が機能しています。ただし、配当が高いだけで株価が下がっている「罠銘柄」が含まれていないか定期的にチェックしましょう。")
+        else:
+            st.write("⚖️ キャピタルゲイン（値上がり益）とインカムゲイン（配当）のバランスが取れた水準です。")
+
+# --- メイン処理 ---
 st.sidebar.title("もりかわ株管理APP")
-# メニュー名の変更
-page = st.sidebar.radio("メニュー切り替え", ["📊 保有資産内訳", "📰 保有銘柄に関するニュース"], index=0)
+page = st.sidebar.radio("メニュー切り替え", ["📊 保有資産内訳", "📰 保有銘柄に関するニュース", "🤖 AIポートフォリオ診断"], index=0)
 st.sidebar.markdown("---")
 st.sidebar.header("📂 データ取り込み")
 st.sidebar.caption("対応：楽天証券、SBI証券")
@@ -493,11 +506,12 @@ if uploaded_files:
         df_all = pd.concat(df_list, ignore_index=True)
         df_all = guess_attributes(df_all)
         
-        # ページ切り替え
         if page == "📊 保有資産内訳":
             render_dashboard(df_all)
-        else:
+        elif page == "📰 保有銘柄に関するニュース":
             render_news(df_all)
+        elif page == "🤖 AIポートフォリオ診断":
+            render_ai_advice(df_all)
     else:
         st.error("CSVを読み込めませんでした。")
 else:
