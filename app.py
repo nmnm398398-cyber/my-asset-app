@@ -1,12 +1,12 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import io
 
 # --- 設定エリア ---
 FIRE_GOAL = 30000000  # 目標金額（3000万円）
 
 st.set_page_config(page_title="資産管理ダッシュボード", layout="wide")
-
 st.title("💰 資産管理 & Side FIRE ダッシュボード")
 
 # --- 関数定義エリア ---
@@ -22,45 +22,90 @@ def clean_currency(x):
             return 0
     return x
 
-def load_rakuten(file):
-    """楽天証券のCSV読み込み & 整形"""
+def load_csv_smartly(uploaded_file, source_name):
+    """
+    CSVを賢く読み込む関数
+    - 余計なヘッダー行を自動スキップ
+    - Shift-JIS / UTF-8 両対応
+    - エラー行を無視
+    """
     try:
-        # 楽天はShift-JISが多い。ヘッダー行は通常0行目
-        df = pd.read_csv(file, encoding='shift_jis')
+        # 1. まずバイナリとして読み込み、Shift-JISでデコード（失敗したらUTF-8）
+        bytes_data = uploaded_file.getvalue()
+        try:
+            text_data = bytes_data.decode('shift_jis')
+        except UnicodeDecodeError:
+            text_data = bytes_data.decode('utf-8', errors='ignore')
+
+        # 2. 行ごとに分割して、「銘柄」や「ファンド」という言葉がある行を探す
+        lines = text_data.splitlines()
+        header_index = 0
+        found_header = False
         
-        # 必要な列が存在するか確認（あくまで一例です。実際のCSVに合わせて調整が必要な場合があります）
-        # 一般的な列名: '銘柄・ファンド名', '保有数量', '平均取得価額', '現在値', '評価額', '評価損益', '通貨'
-        target_cols = {'銘柄・ファンド名': '銘柄名', '評価額': '評価額', '評価損益': '評価損益'}
+        # 検索するキーワード（各社のCSVヘッダーによくある言葉）
+        keywords = ['銘柄', 'ファンド', '保有数量', '評価金額', '取得単価']
+
+        for i, line in enumerate(lines):
+            # 行の中にキーワードのどれかが含まれていたら、そこをヘッダーとみなす
+            if any(k in line for k in keywords):
+                header_index = i
+                found_header = True
+                break
         
+        if not found_header:
+            st.warning(f"{source_name}: データ表の開始位置が見つかりませんでした。通常の読み込みを試みます。")
+
+        # 3. 見つけたヘッダー位置からPandasで読み込む
+        # on_bad_lines='skip' で列数が合わない行（注意書きなど）を無視する
+        df = pd.read_csv(
+            io.StringIO(text_data), 
+            skiprows=header_index, 
+            on_bad_lines='skip'
+        )
+
+        # 4. 列名の統一処理
+        target_cols = {}
+        if source_name == '楽天':
+            # 楽天のパターン
+            target_cols = {
+                '銘柄・ファンド名': '銘柄名', 
+                'ファンド名': '銘柄名',
+                '銘柄名': '銘柄名',
+                '評価額': '評価額', 
+                '時価評価額': '評価額',
+                '評価損益': '評価損益',
+                'トータルリターン': '評価損益'
+            }
+        elif source_name == 'SBI':
+            # SBIのパターン
+            target_cols = {
+                '銘柄名': '銘柄名',
+                'ファンド名': '銘柄名',
+                '銘柄コード/銘柄名': '銘柄名',
+                '評価金額': '評価額',
+                '評価額': '評価額', # まれにある
+                '時価評価額': '評価額', # まれにある
+                '評価損益': '評価損益',
+                '含み損益': '評価損益'
+            }
+
         # 存在する列だけ抽出してリネーム
         available_cols = [c for c in target_cols.keys() if c in df.columns]
-        df = df[available_cols].rename(columns=target_cols)
         
-        df['証券会社'] = '楽天証券'
-        return df
-    except Exception as e:
-        st.error(f"楽天CSVの読み込みエラー: {e}")
-        return pd.DataFrame()
+        if not available_cols:
+            st.error(f"{source_name}: 必要な列（銘柄名や評価額）が見つかりませんでした。列名: {list(df.columns)}")
+            return pd.DataFrame()
 
-def load_sbi(file):
-    """SBI証券のCSV読み込み & 整形"""
-    try:
-        # SBIはCSVの1行目に余計なヘッダーがある場合が多いので skiprows=0 で様子見しつつ、
-        # うまくいかない場合は skiprows=1 などを試す必要があります。
-        # ここでは一般的なパターンで記述します。
-        df = pd.read_csv(file, encoding='shift_jis')
-        
-        # SBIの列名パターン（保有証券一覧などにより異なる）
-        # '銘柄コード', '銘柄名', '保有株数', '現在値', '評価金額', '評価損益'
-        target_cols = {'銘柄名': '銘柄名', '評価金額': '評価額', '評価損益': '評価損益'}
-        
-        available_cols = [c for c in target_cols.keys() if c in df.columns]
         df = df[available_cols].rename(columns=target_cols)
         
-        df['証券会社'] = 'SBI証券'
+        # 重複列がある場合は最初のものを採用（列名マッピングの都合）
+        df = df.loc[:, ~df.columns.duplicated()]
+        
+        df['証券会社'] = f"{source_name}証券"
         return df
+
     except Exception as e:
-        st.error(f"SBI CSVの読み込みエラー: {e}")
+        st.error(f"{source_name} CSV読み込みエラー詳細: {e}")
         return pd.DataFrame()
 
 # --- サイドバー：データアップロード ---
@@ -72,18 +117,18 @@ with st.sidebar:
     file_sbi = st.file_uploader("SBI証券 CSV", type=['csv'])
     
     st.markdown("---")
-    st.caption("※CSVの形式が読み込めない場合は、列名を確認してコードを微修正する必要があります。")
+    st.info("CSVのヘッダー（銘柄名などが書かれた行）を自動検出し、読み込めない行はスキップします。")
 
 # --- メイン処理 ---
 df_list = []
 
 if file_rakuten:
-    df_r = load_rakuten(file_rakuten)
+    df_r = load_csv_smartly(file_rakuten, '楽天')
     if not df_r.empty:
         df_list.append(df_r)
 
 if file_sbi:
-    df_s = load_sbi(file_sbi)
+    df_s = load_csv_smartly(file_sbi, 'SBI')
     if not df_s.empty:
         df_list.append(df_s)
 
@@ -122,15 +167,16 @@ if df_list:
     
     with col_chart1:
         st.subheader("ポートフォリオ内訳 (銘柄別)")
-        # 金額が小さいものは「その他」にまとめる処理を入れると見やすいですが、まずは全表示
-        fig = px.pie(df_all, values='評価額', names='銘柄名', title='銘柄別構成比', hole=0.4)
-        fig.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig, use_container_width=True)
+        if not df_all.empty:
+            fig = px.pie(df_all, values='評価額', names='銘柄名', title='銘柄別構成比', hole=0.4)
+            fig.update_traces(textposition='inside', textinfo='percent+label')
+            st.plotly_chart(fig, use_container_width=True)
 
     with col_chart2:
         st.subheader("証券会社別 バランス")
-        fig2 = px.bar(df_all, x='証券会社', y='評価額', color='銘柄名', title='証券会社別 積み上げ')
-        st.plotly_chart(fig2, use_container_width=True)
+        if not df_all.empty:
+            fig2 = px.bar(df_all, x='証券会社', y='評価額', color='銘柄名', title='証券会社別 積み上げ')
+            st.plotly_chart(fig2, use_container_width=True)
 
     # --- 3. 詳細データテーブル ---
     st.subheader("保有銘柄 詳細リスト")
@@ -142,7 +188,3 @@ if df_list:
 
 else:
     st.info("👈 左側のサイドバーからCSVファイルをアップロードしてください。")
-    st.write("手順：")
-    st.write("1. 楽天証券/SBI証券にログイン")
-    st.write("2. 「保有商品一覧」などのページからCSVをダウンロード")
-    st.write("3. このアプリにドラッグ＆ドロップ")
