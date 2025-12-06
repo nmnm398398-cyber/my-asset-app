@@ -25,7 +25,6 @@ def clean_currency(x):
     if isinstance(x, (int, float)):
         return float(x)
     if isinstance(x, str):
-        # カンマ、円、USD、%などを除去
         clean_str = x.replace(',', '').replace('円', '').replace('USD', '').replace('%', '').strip()
         try:
             return float(clean_str)
@@ -71,25 +70,24 @@ def guess_account_type(txt):
     
     if "旧NISA" in txt:
         return "旧NISA"
-    elif "つみたて" in txt: # 新NISAつみたて投資枠
+    elif "つみたて" in txt:
         return "新NISA(つみたて)"
-    elif "成長" in txt: # 新NISA成長投資枠
+    elif "成長" in txt:
         return "新NISA(成長)"
-    elif "NISA" in txt: # その他のNISA表記（文脈によるが一旦新NISA扱い）
+    elif "NISA" in txt:
         return "新NISA(不明)"
     elif "特定" in txt:
         return "特定口座"
     elif "一般" in txt:
         return "一般口座"
     else:
-        return "特定口座" # デフォルト
+        return "特定口座"
 
 def default_yield(row):
-    """銘柄名から予想配当利回りを推測（全角半角対応版）"""
+    """銘柄名から予想配当利回りを推測"""
     name = normalize_text(row['銘柄名'])
     asset_class = row['資産クラス']
     
-    # キーワードによる推定（数値は概算）
     if "高配当" in name or "VYM" in name or "HDV" in name or "SPYD" in name:
         return 3.5
     elif "REIT" in name or "リート" in name:
@@ -97,7 +95,7 @@ def default_yield(row):
     elif "債券" in name or "AGG" in name or "BND" in name:
         return 2.5
     elif "インド" in name:
-        return 0.0 # インド株投信は配当が出ないことが多い
+        return 0.0
     elif "NASDAQ" in name or "ナスダック" in name:
         return 0.5
     elif "S&P500" in name or "SP500" in name or "全米" in name or "VTI" in name:
@@ -107,148 +105,126 @@ def default_yield(row):
     elif "TOPIX" in name or "日経" in name:
         return 1.8
     elif asset_class == '個別株':
-        # 個別株で判定不能なものは一旦2%と置く
         return 2.0
-    
     return 0.0
 
-# --- CSV読み込みロジック ---
+# --- CSV読み込みロジック (強化版) ---
 
-def load_rakuten_advanced(text_data):
-    """楽天証券のCSV解析"""
-    lines = text_data.splitlines()
-    header_row_index = -1
-    
-    for i, line in enumerate(lines):
-        if '"種別"' in line and '"銘柄"' in line:
-            header_row_index = i
-            break
-    
-    if header_row_index == -1:
+def load_rakuten_parser(text_data):
+    """楽天証券パーサー"""
+    try:
+        lines = text_data.splitlines()
+        header_idx = -1
+        # 楽天は「種別」と「銘柄」がある行がヘッダー
+        for i, line in enumerate(lines):
+            if '"種別"' in line and '"銘柄"' in line:
+                header_idx = i
+                break
+        
+        if header_idx == -1: return pd.DataFrame()
+
+        df = pd.read_csv(io.StringIO(text_data), skiprows=header_idx)
+        rename_map = {
+            '銘柄': '銘柄名', '銘柄・ファンド名': '銘柄名',
+            '保有数量': '保有数', '時価評価額[円]': '評価額',
+            '評価損益[円]': '評価損益', '種別': '種別_raw', '口座': '口座区分_raw'
+        }
+        available = [c for c in rename_map.keys() if c in df.columns]
+        df = df[available].rename(columns=rename_map)
+        df['証券会社'] = '楽天証券'
+        df['口座区分'] = df['口座区分_raw'].apply(guess_account_type)
+        return df
+    except:
         return pd.DataFrame()
 
-    df = pd.read_csv(io.StringIO(text_data), skiprows=header_row_index)
-
-    rename_map = {
-        '銘柄': '銘柄名', '銘柄・ファンド名': '銘柄名',
-        '保有数量': '保有数',
-        '平均取得価額': '取得単価',
-        '時価評価額[円]': '評価額',
-        '評価損益[円]': '評価損益',
-        '種別': '種別_raw',
-        '口座': '口座区分_raw'
-    }
-    
-    available_cols = [c for c in rename_map.keys() if c in df.columns]
-    df = df[available_cols].rename(columns=rename_map)
-    
-    df['証券会社'] = '楽天証券'
-    # 楽天の口座区分文字列を正規化して判定
-    df['口座区分'] = df['口座区分_raw'].apply(guess_account_type)
-    
-    return df
-
-def load_sbi_advanced(text_data):
-    """SBI証券のCSV解析（修正版：ブロック構造対応強化）"""
+def load_sbi_parser_greedy(text_data):
+    """SBI証券 強力スキャンパーサー"""
     data_rows = []
     lines = text_data.splitlines()
-    reader = csv.reader(lines)
+    reader = csv.reader(lines) # CSVとして正しくパース
 
     current_section = "不明"
     header_map = {}
     
+    # 全行を走査
     for row in reader:
         if not row: continue
         line_str = ",".join(row)
 
-        if "合計" in line_str:
+        # 1. セクション名の更新（行に「株式」や「投資信託」があり、ヘッダーではない場合）
+        if ("株式" in line_str or "投資信託" in line_str) and "銘柄" not in line_str and "ファンド名" not in line_str:
+            current_section = line_str.replace('"', '').replace(',', '').strip()
             continue
-        
-        # 1. セクション（口座・商品種別）の判定
-        if ("株式" in line_str or "投資信託" in line_str) and \
-           ("銘柄" not in line_str and "ファンド名" not in line_str):
-                current_section = line_str.replace('"', '').replace(',', '')
-                continue
 
-        # 2. ヘッダー行の判定
-        if "銘柄" in line_str or "ファンド名" in line_str:
+        # 2. ヘッダー行の検出（「銘柄」または「ファンド名」があり、かつ「評価」がある行）
+        if ("銘柄" in line_str or "ファンド名" in line_str) and ("評価" in line_str or "含み損益" in line_str):
             header_map = {col: idx for idx, col in enumerate(row)}
             continue
 
-        # 3. データ行の解析
-        # ※ここを修正：0番目の列（ファンド名など）を確実に拾えるようにロジック変更
-        name_idx = None
-        for k in ['銘柄名称', 'ファンド名', '銘柄コード/銘柄名']:
-            if k in header_map:
-                name_idx = header_map[k]
-                break
-                
-        val_idx = None
-        for k in ['評価額', '評価金額']:
-             if k in header_map:
-                 val_idx = header_map[k]
-                 break
-                 
-        pl_idx = None
-        for k in ['評価損益', '含み損益']:
-            if k in header_map:
-                pl_idx = header_map[k]
-                break
-        
-        # 必要な列インデックスが見つかっており、行の長さが十分にある場合
-        if name_idx is not None and val_idx is not None and len(row) > max(name_idx, val_idx):
-            try:
-                val_check = clean_currency(row[val_idx])
-                # 明らかにデータ行でないもの（0円かつゴミデータ）を除外
-                if val_check == 0 and "円" not in str(row[val_idx]) and str(row[val_idx]) != "0":
-                   pass
-                else:
-                    item = {}
-                    item['銘柄名'] = row[name_idx]
-                    item['評価額'] = val_check
-                    item['評価損益'] = clean_currency(row[pl_idx]) if pl_idx is not None else 0
-                    item['証券会社'] = 'SBI証券'
+        # 3. データ行の取り込み（ヘッダーが見つかった後の行で、必要な列がある場合）
+        if not header_map: continue
+
+        # 列の位置を探す
+        name_col = next((k for k in ['銘柄名称', 'ファンド名', '銘柄コード/銘柄名'] if k in header_map), None)
+        val_col = next((k for k in ['評価額', '評価金額'] if k in header_map), None)
+        pl_col = next((k for k in ['評価損益', '含み損益'] if k in header_map), None)
+
+        if name_col and val_col:
+            name_idx = header_map[name_col]
+            val_idx = header_map[val_col]
+            
+            # 行の長さが足りているか
+            if len(row) > max(name_idx, val_idx):
+                try:
+                    raw_val = row[val_idx]
+                    val_float = clean_currency(raw_val)
                     
-                    # セクション情報から属性を付与
-                    item['種別_raw'] = '投資信託' if '投資信託' in current_section else '株式'
-                    item['口座区分_raw'] = current_section
-                    item['口座区分'] = guess_account_type(current_section)
-                    
-                    data_rows.append(item)
-            except:
-                continue
+                    # 0円かつゴミデータの場合はスキップ、0円でも意味があるなら採用
+                    if val_float == 0 and "0" not in str(raw_val):
+                        pass
+                    else:
+                        item = {
+                            '銘柄名': row[name_idx],
+                            '評価額': val_float,
+                            '評価損益': clean_currency(row[header_map[pl_col]]) if pl_col else 0,
+                            '証券会社': 'SBI証券',
+                            '種別_raw': '投資信託' if '投資信託' in current_section else '株式',
+                            '口座区分_raw': current_section,
+                            '口座区分': guess_account_type(current_section)
+                        }
+                        data_rows.append(item)
+                except:
+                    continue
 
     return pd.DataFrame(data_rows)
 
-def process_files(uploaded_files):
+def process_files_robust(uploaded_files):
     df_list = []
     for file in uploaded_files:
         bytes_data = file.getvalue()
+        # エンコード判定（cp932を優先）
+        text_data = ""
         try:
-            text_data = bytes_data.decode('shift_jis')
+            text_data = bytes_data.decode('cp932')
         except:
-            text_data = bytes_data.decode('utf-8', errors='ignore')
-            
-        if "楽天" in text_data or ("種別" in text_data and "保有数量" in text_data):
-            df = load_rakuten_advanced(text_data)
-            df_list.append(df)
-        elif "保有証券一覧" in text_data or "評価損益合計" in text_data:
-            df = load_sbi_advanced(text_data)
-            df_list.append(df)
-        else:
-            # 判別不能時のフォールバック
-            df = load_rakuten_advanced(text_data)
-            if df.empty:
-                df = load_sbi_advanced(text_data)
-            if not df.empty:
-                df_list.append(df)
-
-    if not df_list:
-        return pd.DataFrame()
+            try:
+                text_data = bytes_data.decode('shift_jis')
+            except:
+                text_data = bytes_data.decode('utf-8', errors='ignore')
         
+        # まず楽天として解析を試みる
+        df_r = load_rakuten_parser(text_data)
+        if not df_r.empty and len(df_r) > 0:
+            df_list.append(df_r)
+        else:
+            # 楽天でなければSBIとして解析
+            df_s = load_sbi_parser_greedy(text_data)
+            if not df_s.empty:
+                df_list.append(df_s)
+
+    if not df_list: return pd.DataFrame()
+    
     df_all = pd.concat(df_list, ignore_index=True)
-    df_all['評価額'] = df_all['評価額'].apply(clean_currency)
-    df_all['評価損益'] = df_all['評価損益'].apply(clean_currency)
     df_all = df_all.fillna(0)
     
     # 分析用タグ付け
@@ -261,25 +237,26 @@ def process_files(uploaded_files):
 
 with st.sidebar:
     st.header("📂 データ取り込み")
-    uploaded_files = st.file_uploader(
-        "楽天・SBIのCSVをまとめてアップロード", 
-        type=['csv'], 
-        accept_multiple_files=True
-    )
+    uploaded_files = st.file_uploader("楽天・SBIのCSVをまとめてアップロード", type=['csv'], accept_multiple_files=True)
     st.caption("※CSVは自動判別されます")
 
 if uploaded_files:
-    df_all = process_files(uploaded_files)
+    df_all = process_files_robust(uploaded_files)
     
     if not df_all.empty:
-        # --- 1. サマリーKPI ---
+        # --- 1. サマリーKPI (万円単位) ---
         total_assets = df_all['評価額'].sum()
         total_profit = df_all['評価損益'].sum()
         
+        # 単位変換（万円）
+        total_assets_man = total_assets / 10000
+        total_profit_man = total_profit / 10000
+        fire_goal_man = FIRE_GOAL / 10000
+        
         st.subheader("📈 資産サマリー")
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("総資産評価額", f"{total_assets:,.0f} 円")
-        c2.metric("含み益", f"{total_profit:,.0f} 円", delta_color="normal")
+        c1.metric("総資産", f"{total_assets_man:,.0f} 万円")
+        c2.metric("含み益", f"{total_profit_man:,.0f} 万円", delta_color="normal")
         c3.metric("利益率", f"{(total_profit/total_assets)*100:.1f} %")
         c4.metric("Side FIRE 達成率", f"{(total_assets/FIRE_GOAL)*100:.1f} %")
         st.progress(min(total_assets / FIRE_GOAL, 1.0))
@@ -294,65 +271,56 @@ if uploaded_files:
         with tab1:
             col_a, col_b = st.columns([1, 1])
             with col_a:
-                fig_sun = px.sunburst(
-                    df_all, path=['国・地域', '銘柄名'], values='評価額',
-                    title="国別・銘柄別 構成比"
-                )
+                fig_sun = px.sunburst(df_all, path=['国・地域', '銘柄名'], values='評価額', title="国別・銘柄別 構成比")
                 st.plotly_chart(fig_sun, use_container_width=True)
             with col_b:
-                fig_pie_country = px.pie(df_all, values='評価額', names='国・地域', title='国・地域 比率')
-                st.plotly_chart(fig_pie_country, use_container_width=True)
+                fig_pie = px.pie(df_all, values='評価額', names='国・地域', title='国・地域 比率')
+                st.plotly_chart(fig_pie, use_container_width=True)
 
         with tab2:
-            fig_bar_class = px.bar(
-                df_all, x='資産クラス', y='評価額', color='国・地域', 
-                title='資産クラス × 国別構成'
-            )
+            fig_bar_class = px.bar(df_all, x='資産クラス', y='評価額', color='国・地域', title='資産クラス構成')
+            # 軸の単位も万円にするハックはないが、ツールチップは見やすい
             st.plotly_chart(fig_bar_class, use_container_width=True)
 
         with tab3:
-            # 口座区分ごとの集計（新・旧NISAの区別確認用）
             account_sum = df_all.groupby('口座区分')['評価額'].sum().reset_index()
-            fig_bar_account = px.bar(
-                account_sum, x='口座区分', y='評価額', color='口座区分',
-                title='口座区分ごとの資産状況（新・旧NISA区別）'
-            )
-            st.plotly_chart(fig_bar_account, use_container_width=True)
+            fig_bar_acc = px.bar(account_sum, x='口座区分', y='評価額', color='口座区分', title='口座区分別 資産状況')
+            st.plotly_chart(fig_bar_acc, use_container_width=True)
 
         st.markdown("---")
 
         # --- 3. 配当金シミュレーション ---
         st.subheader("💰 配当金シミュレーション")
-        st.info("💡 銘柄名から利回りを自動推測しました。実態と異なる場合は表の数値を修正してください。")
+        
+        # 編集用データ
+        df_div = df_all[['銘柄名', '口座区分', '評価額']].copy()
+        df_div['予想利回り(%)'] = df_all.apply(default_yield, axis=1)
 
-        # デフォルト利回りを適用（ここで自動推測）
-        df_dividend = df_all[['銘柄名', '口座区分', '評価額']].copy()
-        # 計算用に全データを用いて推測
-        df_dividend['予想利回り(%)'] = df_all.apply(default_yield, axis=1)
-
-        # 編集可能なデータフレームを表示
         edited_df = st.data_editor(
-            df_dividend,
+            df_div,
             column_config={
                 "評価額": st.column_config.NumberColumn(format="%d 円"),
-                "予想利回り(%)": st.column_config.NumberColumn(min_value=0.0, max_value=20.0, step=0.1, format="%.1f %%")
+                "予想利回り(%)": st.column_config.NumberColumn(format="%.1f %%", min_value=0.0, max_value=20.0, step=0.1)
             },
             hide_index=True,
             use_container_width=True,
-            height=400,
-            key="dividend_editor" # キーを指定してリロード時の挙動を安定化
+            height=400
         )
 
-        # 計算結果の表示
-        edited_df['年間受取額(予想)'] = edited_df['評価額'] * (edited_df['予想利回り(%)'] / 100)
-        total_div = edited_df['年間受取額(予想)'].sum()
-        total_yield_avg = (total_div / total_assets * 100) if total_assets > 0 else 0
+        # 計算（万円単位で表示）
+        yearly_div = (edited_df['評価額'] * (edited_df['予想利回り(%)'] / 100)).sum()
+        yearly_div_man = yearly_div / 10000
+        yield_avg = (yearly_div / total_assets * 100) if total_assets > 0 else 0
 
         c_d1, c_d2 = st.columns(2)
-        c_d1.metric("年間受取配当金（税引前・予想）", f"{total_div:,.0f} 円")
-        c_d2.metric("ポートフォリオ平均利回り", f"{total_yield_avg:.2f} %")
+        c_d1.metric("年間受取配当金（税引前・予想）", f"{yearly_div_man:,.1f} 万円")
+        c_d2.metric("ポートフォリオ平均利回り", f"{yield_avg:.2f} %")
+
+        # デバッグ用：データ読み込み状況の確認
+        with st.expander("データ読み込み詳細（数が合わない場合はここを確認）"):
+            st.dataframe(df_all[['証券会社', '銘柄名', '評価額', '口座区分']])
 
     else:
-        st.error("データの読み込みに失敗しました。")
+        st.error("データの読み込みに失敗しました。CSVファイルが空か、形式が未対応です。")
 else:
     st.info("CSVファイルをアップロードしてください。")
