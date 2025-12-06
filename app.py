@@ -17,9 +17,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- 定数・設定 ---
-FIRE_GOAL = 30000000  # 目標金額
-
 # --- ユーティリティ関数 ---
 
 def normalize_text(text):
@@ -270,16 +267,20 @@ def render_dashboard(df_all):
 
     # --- 集計 ---
     total_val = df_filtered[selected_metric].sum()
-    total_assets = df_filtered['評価額'].sum()
     total_profit = df_filtered['含み損益(税引前)'].sum()
+    
+    # 証券会社別の集計 (selected_metricベース)
+    rakuten_val = df_filtered[df_filtered['証券会社'] == '楽天証券'][selected_metric].sum()
+    sbi_val = df_filtered[df_filtered['証券会社'] == 'SBI証券'][selected_metric].sum()
     
     st.markdown("### 📈 Dashboard Overview")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"合計 {selected_metric}", f"{total_val:,.0f} 円")
-    c2.metric("総資産評価額", f"{total_assets:,.0f} 円") 
-    c3.metric("含み益(税引前)", f"{total_profit:,.0f} 円", delta_color="normal")
-    c4.metric("Side FIRE 達成率", f"{(total_assets/FIRE_GOAL)*100:.1f} %")
-    st.progress(min(total_assets / FIRE_GOAL, 1.0))
+    c2.metric("含み益 (税引前)", f"{total_profit:,.0f} 円", delta_color="normal")
+    
+    # Side FIRE達成率を削除し、証券会社別の内訳を表示
+    c3.metric(f"楽天証券 ({selected_metric})", f"{rakuten_val:,.0f} 円")
+    c4.metric(f"SBI証券 ({selected_metric})", f"{sbi_val:,.0f} 円")
 
     st.markdown("---")
 
@@ -347,7 +348,10 @@ def render_dashboard(df_all):
 
         df_monthly = pd.DataFrame(list(monthly_div.items()), columns=['月', '配当金額'])
         total_year_div = df_monthly['配当金額'].sum()
-        avg_yield_port = (total_year_div / total_assets * 100) if total_assets > 0 else 0
+        
+        # 利回り計算（評価額ベース）
+        total_assets_val = df_filtered['評価額'].sum()
+        avg_yield_port = (total_year_div / total_assets_val * 100) if total_assets_val > 0 else 0
 
         c_d1, c_d2 = st.columns(2)
         c_d1.metric("年間受取配当（税引前・予想）", f"{total_year_div:,.0f} 円")
@@ -359,7 +363,7 @@ def render_dashboard(df_all):
         st.plotly_chart(fig_div, use_container_width=True)
 
 def render_news(df_all):
-    st.header("📰 保有資産（個別株）に関するニュース")
+    st.header("📰 保有銘柄に関するニュース")
     st.caption("※投資信託（S&P500、オルカン等）は除外しています。")
 
     # 1. 個別株フィルタリング
@@ -377,15 +381,15 @@ def render_news(df_all):
     
     # ニュース取得ループ
     for stock in top_stocks:
-        # 銘柄名が長すぎる場合や、余計な記号がある場合は少しクリーニング（Google検索精度向上のため）
-        search_query = stock.replace('ホールディングス', 'HD').split(' ')[0] # 簡易的な短縮
+        # 銘柄名が長すぎる場合や、余計な記号がある場合は少しクリーニング
+        search_query = stock.replace('ホールディングス', 'HD').split(' ')[0] 
         
         # クエリ作成
         query = f"{search_query} 株価 ニュース"
         entries = fetch_news_rss(query)
         
         if entries:
-            # エキスパンダーで表示（デフォルトは閉じておくか、上位だけ開く）
+            # エキスパンダーで表示
             with st.expander(f"📌 {stock}", expanded=True):
                 found_count = 0
                 for entry in entries:
@@ -418,9 +422,10 @@ def render_news(df_all):
 # サイドバー共通部分
 st.sidebar.title("もりかわ株管理APP")
 # メニュー名の変更
-page = st.sidebar.radio("メニュー切り替え", ["📊 保有資産内訳", "📰 保有資産に関するニュース"], index=0)
+page = st.sidebar.radio("メニュー切り替え", ["📊 保有資産内訳", "📰 保有銘柄に関するニュース"], index=0)
 st.sidebar.markdown("---")
 st.sidebar.header("📂 データ取り込み")
+st.sidebar.caption("対応：楽天証券、SBI証券")
 uploaded_files = st.sidebar.file_uploader("CSVをアップロード", type=['csv'], accept_multiple_files=True)
 
 if uploaded_files:
