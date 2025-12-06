@@ -184,6 +184,22 @@ def guess_attributes(df):
         if any(x in name for x in ["P&G", "COCA", "J&J", "MCDONALD"]): return "米国ディフェンシブ"
         return "その他事業"
     
+    # --- 新しいカスタム分類ロジック ---
+    def get_custom_category(row):
+        name = normalize_text(row['銘柄名'])
+        ac = get_class(row)
+        
+        # 1. 個別株
+        if ac == "個別株":
+            return "個別株"
+        
+        # 2. 投資信託の分類
+        if any(x in name for x in ["ゴールド", "金", "GOLD"]): return "ゴールド"
+        if any(x in name for x in ["債券", "BND", "AGG"]): return "債券"
+        if any(x in name for x in ["S&P500", "全米", "オルカン", "全世界", "TOPIX", "日経", "NASDAQ", "先進国", "VTI", "VOO"]): return "インデックス投信"
+        
+        return "その他投信"
+
     def get_div_months(row):
         country = get_country(row)
         if country == "日本": return [3, 9]
@@ -196,6 +212,9 @@ def guess_attributes(df):
     df['予想利回り(%)'] = df.apply(get_yield, axis=1)
     df['セクター'] = df.apply(get_sector, axis=1)
     df['配当月'] = df.apply(get_div_months, axis=1)
+    
+    # 新しい分類カラムを追加
+    df['詳細区分'] = df.apply(get_custom_category, axis=1)
     
     df['取得額'] = df['評価額'] - df['評価損益']
     def calc_after_tax(row):
@@ -241,11 +260,15 @@ def render_dashboard(df_all):
         if '分析対象' not in df_all.columns:
             df_all.insert(0, '分析対象', True)
         
-        editor_cols = ['分析対象', '銘柄名', 'セクター', '評価額', '評価損益', '予想利回り(%)', '口座区分']
+        editor_cols = ['分析対象', '詳細区分', '銘柄名', 'セクター', '評価額', '評価損益', '予想利回り(%)']
         edited_df = st.data_editor(
             df_all[editor_cols],
             column_config={
                 "分析対象": st.column_config.CheckboxColumn(default=True),
+                "詳細区分": st.column_config.SelectboxColumn(
+                    options=["個別株", "インデックス投信", "ゴールド", "債券", "その他投信"],
+                    help="自動判定された区分です。必要に応じて修正してください。"
+                ),
                 "評価額": st.column_config.NumberColumn(format="%d"),
                 "評価損益": st.column_config.NumberColumn(format="%d"),
                 "予想利回り(%)": st.column_config.NumberColumn(format="%.1f %%"),
@@ -257,6 +280,7 @@ def render_dashboard(df_all):
     
     df_filtered = df_all.iloc[edited_df.index].copy()
     df_filtered['分析対象'] = edited_df['分析対象']
+    df_filtered['詳細区分'] = edited_df['詳細区分'] # 編集内容を反映
     df_filtered['セクター'] = edited_df['セクター']
     df_filtered['予想利回り(%)'] = edited_df['予想利回り(%)']
     df_filtered = df_filtered[df_filtered['分析対象'] == True]
@@ -278,7 +302,6 @@ def render_dashboard(df_all):
     c1.metric(f"合計 {selected_metric}", f"{total_val:,.0f} 円")
     c2.metric("含み益 (税引前)", f"{total_profit:,.0f} 円", delta_color="normal")
     
-    # Side FIRE達成率を削除し、証券会社別の内訳を表示
     c3.metric(f"楽天証券 ({selected_metric})", f"{rakuten_val:,.0f} 円")
     c4.metric(f"SBI証券 ({selected_metric})", f"{sbi_val:,.0f} 円")
 
@@ -290,7 +313,7 @@ def render_dashboard(df_all):
     
     fig_treemap = px.treemap(
         df_filtered, 
-        path=[px.Constant("全資産"), 'セクター', '銘柄名'], 
+        path=[px.Constant("全資産"), '詳細区分', '銘柄名'], 
         values=selected_metric,
         color='損益率',
         color_continuous_scale='RdBu_r',
@@ -321,16 +344,45 @@ def render_dashboard(df_all):
             st.plotly_chart(fig2, use_container_width=True)
 
     with tab2:
+        # 新しいカスタム区分のグラフを追加
+        st.subheader("💡 資産内訳（詳細区分）")
+        col_new1, col_new2 = st.columns([1, 1])
+        
+        with col_new1:
+            # 詳細区分の円グラフ
+            fig_custom = px.pie(
+                df_filtered, 
+                values=selected_metric, 
+                names='詳細区分', 
+                title="資産内訳 (個別株・インデックス投信・ゴールド・債券)",
+                hole=0.4,
+                color='詳細区分',
+                color_discrete_map={
+                    "個別株": "#1f77b4", # 青
+                    "インデックス投信": "#2ca02c", # 緑
+                    "ゴールド": "#ff7f0e", # オレンジ（金に近い色）
+                    "債券": "#d62728", # 赤
+                    "その他投信": "#7f7f7f" # グレー
+                }
+            )
+            fig_custom.update_traces(textinfo='percent+label', hovertemplate='%{label}: %{value:,.0f} 円')
+            st.plotly_chart(fig_custom, use_container_width=True)
+            
+        with col_new2:
+            # 口座区分（既存）
+            acc_grp = df_filtered.groupby('口座区分')[selected_metric].sum().reset_index()
+            fig4 = px.bar(acc_grp, x='口座区分', y=selected_metric, color='口座区分', title="口座区分別残高")
+            fig4 = update_layout_common(fig4)
+            st.plotly_chart(fig4, use_container_width=True)
+
+        st.markdown("---")
+        st.caption("以下は従来の資産クラス（個別株/投資信託）による内訳です。")
+        
         col_a, col_b = st.columns(2)
         with col_a:
             fig3 = px.bar(df_filtered, x='資産クラス', y=selected_metric, color='国・地域', title="資産クラス内訳")
             fig3 = update_layout_common(fig3)
             st.plotly_chart(fig3, use_container_width=True)
-        with col_b:
-            acc_grp = df_filtered.groupby('口座区分')[selected_metric].sum().reset_index()
-            fig4 = px.bar(acc_grp, x='口座区分', y=selected_metric, color='口座区分', title="口座区分別残高")
-            fig4 = update_layout_common(fig4)
-            st.plotly_chart(fig4, use_container_width=True)
 
     with tab3:
         st.subheader("月別配当金シミュレーション (予想)")
