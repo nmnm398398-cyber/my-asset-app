@@ -11,7 +11,7 @@ from datetime import datetime
 
 # --- ページ設定 ---
 st.set_page_config(
-    page_title="もりかわ株管理APP", 
+    page_title="My Asset Manager", 
     page_icon="📈", 
     layout="wide",
     initial_sidebar_state="expanded"
@@ -26,6 +26,7 @@ def normalize_text(text):
 def clean_currency(x):
     if isinstance(x, (int, float)): return float(x)
     if isinstance(x, str):
+        # カンマ、円、USD、%などを除去
         clean_str = x.replace(',', '').replace('円', '').replace('USD', '').replace('%', '').strip()
         try:
             return float(clean_str)
@@ -45,12 +46,13 @@ def detect_encoding(bytes_data):
     return bytes_data.decode('utf-8', errors='ignore')
 
 def universal_parser(text_data):
-    """万能CSVパーサー"""
+    """万能CSVパーサー（銘柄コード対応版）"""
     data_rows = []
     lines = text_data.splitlines()
     reader = csv.reader(lines)
 
     col_maps = {
+        'code': ['銘柄コード', 'コード', '銘柄コード・ティッカー', 'ティッカー'],
         'name': ['銘柄', '銘柄名', '銘柄名称', 'ファンド名', '銘柄コード/銘柄名', '銘柄・ファンド名'],
         'value': ['評価額', '評価金額', '時価評価額', '時価評価額[円]', '金額'],
         'profit': ['評価損益', '含み損益', '評価損益[円]', '損益'],
@@ -82,6 +84,8 @@ def universal_parser(text_data):
 
         if not current_header_map: continue
 
+        # 列インデックスの特定
+        code_idx = next((current_header_map[k] for k in col_maps['code'] if k in current_header_map), None)
         name_idx = next((current_header_map[k] for k in col_maps['name'] if k in current_header_map), None)
         val_idx = next((current_header_map[k] for k in col_maps['value'] if k in current_header_map), None)
         pl_idx = next((current_header_map[k] for k in col_maps['profit'] if k in current_header_map), None)
@@ -97,8 +101,13 @@ def universal_parser(text_data):
                         continue
                     
                     acc_val = row[acc_idx] if acc_idx is not None and len(row) > acc_idx else current_section
+                    code_val = row[code_idx].strip() if code_idx is not None and len(row) > code_idx else ""
                     
+                    # 銘柄コードのクリーニング（SBIのcsvなどで "=" がつく場合があるため）
+                    code_val = code_val.replace('=', '').replace('"', '')
+
                     item = {
+                        'コード': code_val,
                         '銘柄名': name_val,
                         '評価額': val_float,
                         '評価損益': clean_currency(row[pl_idx]) if pl_idx is not None and len(row) > pl_idx else 0,
@@ -111,6 +120,7 @@ def universal_parser(text_data):
 
     df = pd.DataFrame(data_rows)
     if not df.empty:
+        # 証券会社判定
         if any(k in current_header_map for k in ['銘柄コード・ティッカー', '時価評価額[円]']):
             df['証券会社'] = '楽天証券'
         else:
@@ -119,7 +129,7 @@ def universal_parser(text_data):
     return df
 
 def guess_attributes(df):
-    """属性推測"""
+    """属性・利回り推測（精度向上版）"""
     if df.empty: return df
     
     def get_country(row):
@@ -150,15 +160,39 @@ def guess_attributes(df):
         return "特定口座"
 
     def get_yield(row):
+        """銘柄別の配当利回り推測（主要銘柄をハードコードして精度向上）"""
         name = normalize_text(row['銘柄名'])
         ac = get_class(row)
+        
+        # --- 主要銘柄の利回り辞書 (概算%) ---
+        # ※株式分割しても利回り（%）は大きく変わらないため、ここを適正値にしておけば配当額はズレない
+        yield_map = {
+            "日本たばこ": 4.5, "JT": 4.5,
+            "ソフトバンク": 4.0, "SOFTBANK": 4.0,
+            "日本製鉄": 3.8, "NIPPON STEEL": 3.8,
+            "三菱UFJ": 3.0, "三井住友": 3.0, "みずほ": 2.8,
+            "三菱商事": 2.6, "三井物産": 2.6, "伊藤忠": 2.4,
+            "NTT": 3.0, "日本電信電話": 3.0, "KDDI": 3.0,
+            "トヨタ": 2.5, "ホンダ": 3.0,
+            "武田": 4.0, "アステラス": 3.5,
+            "商船三井": 5.0, "日本郵船": 5.0, "川崎汽船": 4.5,
+            "INPEX": 3.5,
+            "イオン": 1.0, "AEON": 1.0
+        }
+        
+        # 辞書に一致するものがあればそれを返す
+        for key, val in yield_map.items():
+            if key in name:
+                return val
+
+        # --- 一般ルール ---
         if any(x in name for x in ["高配当", "VYM", "HDV", "SPYD"]): return 3.5
         if any(x in name for x in ["REIT", "リート"]): return 4.0
         if any(x in name for x in ["債券", "AGG", "BND"]): return 2.5
         if "インド" in name or "NASDAQ" in name: return 0.0
         if any(x in name for x in ["S&P500", "SP500", "全米", "VTI"]): return 1.3
         if any(x in name for x in ["全世界", "オルカン"]): return 1.5
-        if ac == "個別株": return 2.0
+        if ac == "個別株": return 2.0 # デフォルト
         return 0.0
 
     def get_sector(row):
@@ -217,7 +251,7 @@ def guess_attributes(df):
 
     return df
 
-# --- ニュース取得関数 ---
+# --- ニュース・決算取得関数 ---
 @st.cache_data(ttl=3600)
 def fetch_news_rss(query):
     encoded_query = urllib.parse.quote(query)
@@ -233,29 +267,28 @@ def analyze_sentiment(title):
     if any(w in title for w in neg_words): score = -1
     return score
 
-# --- ページ描画関数 ---
+# --- 各ページ描画関数 ---
 
 def render_dashboard(df_all):
-    # --- 共通サイドバー設定 ---
+    # サイドバー設定
     st.sidebar.markdown("---")
     st.sidebar.header("⚙️ 表示設定")
     metric_options = ['評価額', '取得額', '含み損益(税引前)', '含み損益(税引後)']
     selected_metric = st.sidebar.selectbox("分析する金額を選択:", metric_options, index=0)
     
-    # --- 分析対象フィルター ---
-    with st.expander("✅ 分析対象の選択 & セクター編集（クリックして開く）", expanded=False):
+    # フィルタリング
+    with st.expander("✅ 分析対象の選択 & 利回り編集（クリックして開く）", expanded=False):
         if '分析対象' not in df_all.columns:
             df_all.insert(0, '分析対象', True)
         
-        editor_cols = ['分析対象', '詳細区分', '銘柄名', 'セクター', '評価額', '評価損益', '予想利回り(%)']
+        editor_cols = ['分析対象', '詳細区分', '銘柄名', 'セクター', '評価額', '予想利回り(%)']
         edited_df = st.data_editor(
             df_all[editor_cols],
             column_config={
                 "分析対象": st.column_config.CheckboxColumn(default=True),
                 "詳細区分": st.column_config.SelectboxColumn(options=["個別株", "インデックス投信", "ゴールド", "債券", "その他投信"]),
                 "評価額": st.column_config.NumberColumn(format="%d"),
-                "評価損益": st.column_config.NumberColumn(format="%d"),
-                "予想利回り(%)": st.column_config.NumberColumn(format="%.1f %%"),
+                "予想利回り(%)": st.column_config.NumberColumn(format="%.1f %%", help="株式分割等を考慮した実質利回りを入力してください"),
             },
             use_container_width=True,
             hide_index=True,
@@ -273,22 +306,22 @@ def render_dashboard(df_all):
         st.warning("分析対象がありません。")
         return
 
-    # --- 集計 ---
+    # KPI
     total_val = df_filtered[selected_metric].sum()
     total_profit = df_filtered['含み損益(税引前)'].sum()
     rakuten_val = df_filtered[df_filtered['証券会社'] == '楽天証券'][selected_metric].sum()
     sbi_val = df_filtered[df_filtered['証券会社'] == 'SBI証券'][selected_metric].sum()
     
-    st.markdown("### 📈 Dashboard Overview")
+    st.markdown("### 📈 Asset Overview")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric(f"合計 {selected_metric}", f"{total_val:,.0f} 円")
     c2.metric("含み益 (税引前)", f"{total_profit:,.0f} 円", delta_color="normal")
-    c3.metric(f"楽天証券 ({selected_metric})", f"{rakuten_val:,.0f} 円")
-    c4.metric(f"SBI証券 ({selected_metric})", f"{sbi_val:,.0f} 円")
+    c3.metric(f"楽天証券分", f"{rakuten_val:,.0f} 円")
+    c4.metric(f"SBI証券分", f"{sbi_val:,.0f} 円")
 
     st.markdown("---")
 
-    # --- ツリーマップ ---
+    # ツリーマップ
     st.subheader(f"🗺️ 資産ヒートマップ ({selected_metric})")
     df_filtered['損益率'] = df_filtered.apply(lambda x: (x['評価損益'] / (x['評価額'] - x['評価損益']) * 100) if (x['評価額'] - x['評価損益']) > 0 else 0, axis=1)
     
@@ -305,8 +338,8 @@ def render_dashboard(df_all):
 
     st.markdown("---")
 
-    # --- 詳細分析タブ ---
-    tab1, tab2, tab3 = st.tabs(["📊 セクター・国別", "🥧 資産クラス・口座", "💰 配当カレンダー"])
+    # タブ分析
+    tab1, tab2, tab3 = st.tabs(["📊 セクター・国別", "🥧 資産内訳・口座", "💰 配当カレンダー"])
     
     def update_layout_common(fig):
         fig.update_layout(yaxis=dict(tickformat=","), xaxis=dict(tickformat=","))
@@ -327,7 +360,6 @@ def render_dashboard(df_all):
     with tab2:
         st.subheader("💡 資産内訳（詳細区分）")
         col_new1, col_new2 = st.columns([1, 1])
-        
         with col_new1:
             fig_custom = px.pie(
                 df_filtered, values=selected_metric, names='詳細区分', 
@@ -338,19 +370,11 @@ def render_dashboard(df_all):
             )
             fig_custom.update_traces(textinfo='percent+label', hovertemplate='%{label}: %{value:,.0f} 円')
             st.plotly_chart(fig_custom, use_container_width=True)
-            
         with col_new2:
             acc_grp = df_filtered.groupby('口座区分')[selected_metric].sum().reset_index()
             fig4 = px.bar(acc_grp, x='口座区分', y=selected_metric, color='口座区分', title="口座区分別残高")
             fig4 = update_layout_common(fig4)
             st.plotly_chart(fig4, use_container_width=True)
-
-        st.markdown("---")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            fig3 = px.bar(df_filtered, x='資産クラス', y=selected_metric, color='国・地域', title="資産クラス内訳")
-            fig3 = update_layout_common(fig3)
-            st.plotly_chart(fig3, use_container_width=True)
 
     with tab3:
         st.subheader("月別配当金シミュレーション (予想)")
@@ -384,14 +408,11 @@ def render_news(df_all):
     st.caption("※個別株のみを対象としています。")
 
     stock_df = df_all[df_all['資産クラス'] == '個別株']
-    
     if stock_df.empty:
-        st.info("個別株（株式）のデータが見つかりませんでした。")
+        st.info("個別株データがありません。")
         return
 
     top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(10).index.tolist()
-    
-    st.markdown(f"**評価額上位の個別株（{len(top_stocks)}銘柄）をチェック中...**")
     
     for stock in top_stocks:
         search_query = stock.replace('ホールディングス', 'HD').split(' ')[0] 
@@ -400,136 +421,133 @@ def render_news(df_all):
         
         if entries:
             with st.expander(f"📌 {stock}", expanded=True):
-                found_count = 0
                 for entry in entries:
                     sentiment = analyze_sentiment(entry.title)
                     icon = "📄"
-                    style_prefix = ""
-                    if sentiment == 1: 
-                        icon = "📈"
-                        style_prefix = ":green-background[好材料?]"
-                    elif sentiment == -1: 
-                        icon = "📉"
-                        style_prefix = ":red-background[警戒]"
+                    style = ""
+                    if sentiment == 1: icon, style = "📈", ":green-background[好材料?]"
+                    elif sentiment == -1: icon, style = "📉", ":red-background[警戒]"
                     
                     published = entry.get('published', '')[:16]
-                    st.markdown(f"{icon} {style_prefix} **[{entry.title}]({entry.link})**")
+                    st.markdown(f"{icon} {style} **[{entry.title}]({entry.link})**")
                     st.caption(f"{entry.source.title} | {published}")
-                    found_count += 1
-                if found_count == 0:
-                    st.caption("最近の関連ニュースは見つかりませんでした。")
-    st.markdown("---")
-    st.info("💡 ニュースはGoogle News RSSを利用して取得しています。")
+
+def render_financials(df_all):
+    st.header("📅 決算・IR情報")
+    st.caption("保有銘柄の最新決算ニュースと、決算詳細（Kabutan）へのリンクを表示します。")
+
+    stock_df = df_all[df_all['資産クラス'] == '個別株'].copy()
+    if stock_df.empty:
+        st.info("個別株データがありません。")
+        return
+
+    # 銘柄コードがある場合はそれを使う、なければ銘柄名で頑張る
+    stock_df['コード'] = stock_df['コード'].astype(str).str.replace('.0', '', regex=False)
+    
+    # 評価額順にソート
+    stock_df_sorted = stock_df.groupby(['銘柄名', 'コード'])['評価額'].sum().reset_index().sort_values('評価額', ascending=False)
+
+    for _, row in stock_df_sorted.iterrows():
+        name = row['銘柄名']
+        code = row['コード']
+        
+        with st.expander(f"📊 {name} ({code if code else 'コード不明'})", expanded=False):
+            c_link, c_news = st.columns([1, 2])
+            
+            with c_link:
+                st.markdown("##### 🔗 外部サイト")
+                if code and code != "nan" and code != "":
+                    kabutan_url = f"https://kabutan.jp/stock/finance?code={code}"
+                    nikkei_url = f"https://www.nikkei.com/nkd/company/kessan/?scode={code}"
+                    st.link_button(f"Kabutanで決算を見る ({code})", kabutan_url)
+                    st.link_button(f"日経で決算予定を見る ({code})", nikkei_url)
+                else:
+                    st.warning("CSVに銘柄コードが含まれていないため、リンクを生成できません。")
+            
+            with c_news:
+                st.markdown("##### 📰 最新の決算ニュース")
+                query = f"{name} 決算"
+                entries = fetch_news_rss(query)
+                if entries:
+                    for entry in entries[:3]:
+                        st.markdown(f"- [{entry.title}]({entry.link})")
+                        st.caption(f"{entry.get('published', '')[:10]}")
+                else:
+                    st.caption("直近の決算ニュースは見つかりませんでした。")
 
 def render_ai_advice(df_all):
     st.header("🤖 AIポートフォリオ診断 (Pro)")
-    st.info("あなたの資産状況と最新のニュースを照らし合わせ、プロのアナリスト視点で具体的なアドバイスを行います。")
+    st.info("プロのアナリスト視点でのアドバイスを行います。")
 
-    # データ準備
     total_assets = df_all['評価額'].sum()
     stock_df = df_all[df_all['資産クラス'] == '個別株']
-    top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(3) # 上位3銘柄を重点分析
+    top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(3)
     
-    # --- 1. 健康診断レポート (Good / Bad) ---
     st.subheader("1. 資産健康診断")
     c_good, c_bad = st.columns(2)
 
     with c_good:
         st.success("##### 👍 良い点 (Strengths)")
-        # 配当利回りチェック
         div_yield = (df_all['評価額'] * df_all['予想利回り(%)']).sum() / total_assets
         if div_yield > 2.5:
-            st.markdown(f"- **インカムゲインが太い**: 平均利回りが {div_yield:.1f}% あり、配当再投資による複利効果が期待できます。")
+            st.markdown(f"- **インカムゲインが太い**: 平均利回り {div_yield:.1f}%。配当収入が期待できます。")
         else:
-            st.markdown("- **キャピタルゲイン重視**: 配当よりも値上がり益を狙える構成です。資産拡大期に適しています。")
+            st.markdown("- **キャピタルゲイン重視**: 値上がり益を狙える構成です。")
         
-        # NISA活用度チェック
         nisa_assets = df_all[df_all['口座区分'].str.contains('NISA')]['評価額'].sum()
         nisa_ratio = (nisa_assets / total_assets) * 100
         if nisa_ratio > 40:
-             st.markdown(f"- **NISA活用が優秀**: 資産の {nisa_ratio:.1f}% が非課税口座にあり、税制メリットを最大限享受できています。")
+             st.markdown(f"- **NISA活用が優秀**: 資産の {nisa_ratio:.1f}% が非課税運用されています。")
     
     with c_bad:
         st.error("##### 👎 懸念点 (Weaknesses)")
-        # 集中投資チェック
         if not top_stocks.empty:
             top_stock_ratio = (top_stocks.iloc[0] / total_assets) * 100
             if top_stock_ratio > 20:
-                st.markdown(f"- **銘柄への過度な依存**: 「{top_stocks.index[0]}」1銘柄で資産の {top_stock_ratio:.1f}% を占めています。この銘柄が急落した際のダメージが甚大です。")
+                st.markdown(f"- **集中リスク**: 「{top_stocks.index[0]}」に資産の {top_stock_ratio:.1f}% が集中しています。")
             else:
                 st.markdown("- **大きな懸念なし**: 特定銘柄への過度な集中は見られません。")
         
-        # 資産クラスの偏り
         bond_gold_ratio = df_all[df_all['詳細区分'].isin(['債券', 'ゴールド'])]['評価額'].sum() / total_assets * 100
         if bond_gold_ratio < 5:
-            st.markdown("- **守りが手薄**: 暴落時にクッションとなる「債券」や「ゴールド」がほとんどありません。市場全体の暴落時に資産が大きく目減りするリスクがあります。")
+            st.markdown("- **守りが手薄**: 債券・ゴールドの比率が低く、市場暴落時の耐性が低めです。")
 
     st.markdown("---")
-
-    # --- 2. ニュース連動型・緊急アドバイス ---
     st.subheader("2. 警戒すべきニュースと具体的対策")
-    st.caption("主力銘柄に関する直近のネガティブニュースを検知し、立ち回りを提案します。")
-
+    
     if top_stocks.empty:
-        st.write("個別株の保有がないため、この分析はスキップします。")
+        st.write("個別株保有なし")
     else:
         found_alert = False
         for stock_name, val in top_stocks.items():
             search_query = stock_name.replace('ホールディングス', 'HD').split(' ')[0]
             query = f"{search_query} 株価 ニュース"
             entries = fetch_news_rss(query)
-            
-            # センチメント分析とアドバイス生成
-            neg_news = []
-            for entry in entries:
-                if analyze_sentiment(entry.title) == -1:
-                    neg_news.append(entry)
+            neg_news = [e for e in entries if analyze_sentiment(e.title) == -1]
             
             if neg_news:
                 found_alert = True
                 with st.expander(f"⚠️ **緊急: {stock_name} に警戒シグナル**", expanded=True):
                     for news in neg_news:
                         st.markdown(f"- 📰 [{news.title}]({news.link})")
-                    
                     st.markdown("""
-                    **【プロのアドバイス】**
-                    ネガティブなニュースが出ています。以下の基準で冷静に対処してください：
-                    
-                    1.  **「ストーリー」は崩れたか？**:
-                        * 単なる「地合いの悪化」や「一時的な減益」なら、**ホールド（または押し目買い）**が正解の可能性が高いです。狼狽売りは厳禁です。
-                        * もし「粉飾決算」「強力な競合の出現」「ビジネスモデルの崩壊」なら、**含み損があっても即座に売却（損切り）**することを推奨します。
-                    2.  **損切りラインの徹底**:
-                        * まだ迷う場合は、「買値から-10%」または「直近安値を割ったら」など、**逆指値（ストップロス）**を必ず設定してください。
+                    **【対策】** ストーリーが崩れた場合は損切りを検討。逆指値の設定を推奨します。
                     """)
-        
         if not found_alert:
-            st.info("✅ 現在、主力銘柄に関して、直ちに売却を迫るような致命的なニュースは見当たりません。上昇トレンドであれば利益を伸ばし（トレーリングストップ活用）、静観するのが賢明です。")
+            st.info("✅ 現在、主力銘柄に関して致命的なニュースは見当たりません。")
 
     st.markdown("---")
-
-    # --- 3. 今後の処方箋 (Next Action) ---
     st.subheader("3. 今後のアクションプラン")
-    
-    # 現金比率がないので、アセットアロケーションに基づく提案
     with st.chat_message("assistant", avatar="🧑‍💼"):
-        st.write("ポートフォリオの安定感を高めるために、次の買い付けでは以下を検討してください：")
-        
-        recommendations = []
-        if bond_gold_ratio < 10:
-            recommendations.append("**ゴールド（金）または債券ETF（AGG/BND）**: 株式との相関が低い資産を10%程度まで増やすと、資産全体の変動率（リスク）を下げられます。")
-        
-        if div_yield < 1.5:
-             recommendations.append("**高配当株（VYM/HDVなど）**: 下落相場でも配当が心の支えになります。少しインカムゲインを強化しても良いでしょう。")
-        
-        if not recommendations:
-            recommendations.append("**現状維持（オルカン/S&P500積立継続）**: 非常にバランスが良い状態です。このまま積立を継続し、余計な売買をしないことが最高のリターンを生みます。")
-            
-        for rec in recommendations:
-            st.markdown(f"- {rec}")
+        rec = []
+        if bond_gold_ratio < 10: rec.append("**守りの強化**: ゴールドや債券ETFを少し追加し、リスクを分散させましょう。")
+        if div_yield < 1.5: rec.append("**インカム強化**: 高配当株（VYMなど）を組み入れ、キャッシュフローを安定させましょう。")
+        if not rec: rec.append("**継続**: 非常に良いバランスです。現状の積立を継続してください。")
+        for r in rec: st.markdown(f"- {r}")
 
 # --- メイン処理 ---
-st.sidebar.title("もりかわ株管理APP")
-page = st.sidebar.radio("メニュー切り替え", ["📊 保有資産内訳", "📰 保有銘柄に関するニュース", "🤖 AIポートフォリオ診断"], index=0)
+st.sidebar.title("My Asset Manager")
+page = st.sidebar.radio("メニュー", ["📊 保有資産内訳", "📅 決算・IR情報", "📰 保有銘柄ニュース", "🤖 AIポートフォリオ診断"], index=0)
 st.sidebar.markdown("---")
 st.sidebar.header("📂 データ取り込み")
 st.sidebar.caption("対応：楽天証券、SBI証券")
@@ -550,7 +568,9 @@ if uploaded_files:
         
         if page == "📊 保有資産内訳":
             render_dashboard(df_all)
-        elif page == "📰 保有銘柄に関するニュース":
+        elif page == "📅 決算・IR情報":
+            render_financials(df_all)
+        elif page == "📰 保有銘柄ニュース":
             render_news(df_all)
         elif page == "🤖 AIポートフォリオ診断":
             render_ai_advice(df_all)
