@@ -578,3 +578,4 @@ if uploaded_files:
         st.error("CSVを読み込めませんでした。")
 else:
     st.info("👈 左側のサイドバーからCSVファイルをアップロードしてください。")
+
