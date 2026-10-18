@@ -4,7 +4,6 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io
-import re
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 
@@ -23,7 +22,6 @@ def clean_num(val):
     s = str(val).replace(',', '').replace('円', '').replace('USD', '').replace('US$', '').replace('%', '').replace('+', '').replace(' ', '').replace(' ', '').strip()
     if s in ['', '-', '--', '---', 'nan', 'None']:
         return 0.0
-    # 全角数字・マイナス対応
     s = s.translate(str.maketrans('０１２３４５６７８９－．', '0123456789-.'))
     try:
         return float(s)
@@ -59,9 +57,8 @@ def parse_broker_csv(uploaded_file, broker_name):
 
     lines = text_data.splitlines()
     records = []
-    current_account = '特定'  # デフォルト口座
+    current_account = '特定'
     
-    # セクションごとにヘッダーとデータ行を解析
     i = 0
     n = len(lines)
     header_keywords = ['銘柄', 'ファンド', '商品名', '評価額', '評価金額', '時価評価額', '保有数量', '数量']
@@ -72,22 +69,18 @@ def parse_broker_csv(uploaded_file, broker_name):
             i += 1
             continue
 
-        # セクション見出し行から口座区分を検出（例：「■特定口座」「NISA預り（成長投資枠）」など）
         acc_detect = normalize_account(line)
         if acc_detect and line.count(',') <= 3:
             current_account = acc_detect
 
-        # ヘッダー行の判定
         hit_count = sum(1 for kw in header_keywords if kw in line)
         if hit_count >= 2 and ',' in line:
-            # このブロックの終了位置を探す
             block_lines = [line]
             i += 1
             while i < n:
                 next_line = lines[i].strip()
                 if not next_line:
                     break
-                # 次のヘッダーや別セクション見出しが来たらブロック終了
                 if next_line.count(',') <= 2 and any(k in next_line for k in ['合計', 'トータル', '預り', '口座', '一覧', '■', '◆']):
                     break
                 if sum(1 for kw in header_keywords if kw in next_line) >= 2 and ('銘柄' in next_line or 'ファンド' in next_line):
@@ -95,11 +88,9 @@ def parse_broker_csv(uploaded_file, broker_name):
                 block_lines.append(next_line)
                 i += 1
 
-            # ブロックをDataFrame化
             try:
                 df_block = pd.read_csv(io.StringIO("\n".join(block_lines)), on_bad_lines='skip')
                 
-                # 列名の特定
                 col_name = next((c for c in df_block.columns if any(k in str(c) for k in ['銘柄・ファンド名', '銘柄名', 'ファンド名', 'ファンド', '銘柄', '商品名']) and 'コード' not in str(c)), None)
                 if not col_name:
                     col_name = next((c for c in df_block.columns if any(k in str(c) for k in ['銘柄', 'ファンド', '商品'])), None)
@@ -122,13 +113,11 @@ def parse_broker_csv(uploaded_file, broker_name):
 
                         pnl_num = clean_num(row[col_pnl]) if col_pnl else 0.0
                         
-                        # 取得額の決定（取得額列があればそれを使用、なければ 評価額 - 評価損益 で自動算出）
                         if col_cost and clean_num(row[col_cost]) > 0:
                             cost_num = clean_num(row[col_cost])
                         else:
                             cost_num = max(val_num - pnl_num, 0.0)
 
-                        # 口座区分の決定
                         row_acc = current_account
                         if col_acc:
                             detected = normalize_account(row[col_acc])
@@ -214,7 +203,6 @@ if df_list:
 else:
     df_master = pd.DataFrame(columns=['証券会社', '口座区分', '銘柄名', '評価額', '取得額', '評価損益', '配当利回り(%)'])
 
-# 現在の総資産額（シミュレーションの初期値に連動）
 current_total_valuation = float(df_master['評価額'].sum()) if not df_master.empty else 10000000.0
 current_total_cost = float(df_master['取得額'].sum()) if not df_master.empty else 8000000.0
 
@@ -281,7 +269,6 @@ with tab2:
     if df_master.empty:
         st.warning("分析するデータがありません。サイドバーからCSVをアップロードするか、デモデータを有効にしてください。")
     else:
-        # --- 1. 抽出・計算条件の選択パネル ---
         with st.container(border=True):
             st.markdown("##### 🔍 分析条件の選択")
             f_col1, f_col2, f_col3 = st.columns(3)
@@ -307,7 +294,6 @@ with tab2:
 
         basis_col = '評価額' if '現時点評価額' in asset_basis else '取得額'
 
-        # --- 2. 配当利回りの入力・編集テーブル ---
         with st.expander("✏️ 銘柄ごとの配当利回り(%)を入力・調整する（クリックで開閉）", expanded=True):
             st.caption("※CSVに配当利回りが含まれていない場合、下の表の「配当利回り(%)」列をダブルクリックして直接入力できます。")
             
@@ -338,7 +324,6 @@ with tab2:
                 key="dividend_editor"
             )
 
-            # 編集済みデータのダウンロード保存機能
             csv_save = edited_df.to_csv(index=False).encode('utf-8-sig')
             st.download_button(
                 label="💾 入力した配当利回りデータをCSVで保存（次回からサイドバーで読込可能）",
@@ -347,7 +332,6 @@ with tab2:
                 mime="text/csv"
             )
 
-        # --- 3. フィルタ適用と配当計算 ---
         df_filtered = edited_df[
             (edited_df['証券会社'].isin(selected_brokers)) &
             (edited_df['口座区分'].isin(selected_accounts))
@@ -356,16 +340,12 @@ with tab2:
         if df_filtered.empty:
             st.warning("選択された条件に一致する銘柄がありません。")
         else:
-            # 年間配当額（税引前）の算出
-            # ※入力された利回りを「選択した基準額（評価額 or 取得額）」に掛けるか、時価に対する配当額からYOCを出すか選択可能に
             df_filtered['基準資産額'] = df_filtered[basis_col]
             df_filtered['年間配当額(税引前)'] = df_filtered['評価額'] * (df_filtered['配当利回り(%)'] / 100.0)
             
-            # 税引後配当額（NISAは100%、特定・一般は20.315%課税で79.685%）
             df_filtered['税率'] = df_filtered['口座区分'].apply(lambda x: 0.0 if x == 'NISA' else 0.20315)
             df_filtered['年間配当額(税引後)'] = df_filtered['年間配当額(税引前)'] * (1.0 - df_filtered['税率'])
             
-            # 選択基準（評価額 or 取得額）に対する実質利回り
             df_filtered['基準対比利回り(税引前%)'] = np.where(
                 df_filtered['基準資産額'] > 0,
                 df_filtered['年間配当額(税引前)'] / df_filtered['基準資産額'] * 100.0,
@@ -377,7 +357,6 @@ with tab2:
                 0.0
             )
 
-            # --- 4. 分析サマリーKPI ---
             sum_target_asset = df_filtered['基準資産額'].sum()
             sum_div_pre = df_filtered['年間配当額(税引前)'].sum()
             sum_div_post = df_filtered['年間配当額(税引後)'].sum()
@@ -393,7 +372,6 @@ with tab2:
             k3.metric("年間配当金（税引後・手取り）", f"{sum_div_post:,.0f} 円", f"実質利回り {portfolio_yield_post:.2f} %")
             k4.metric("月平均の手取り配当金", f"{sum_div_post / 12.0:,.0f} 円/月")
 
-            # --- 5. グラフ可視化 ---
             g_col1, g_col2 = st.columns(2)
             with g_col1:
                 df_div_only = df_filtered[df_filtered['年間配当額(税引後)'] > 0]
@@ -457,7 +435,6 @@ with tab3:
                 value=5.0, step=0.1
             )
 
-    # 月次複利で1年目〜30年目まで計算
     monthly_rate = (sim_rate / 100.0) / 12.0
     sim_rows = []
     balance = float(sim_initial)
@@ -481,7 +458,6 @@ with tab3:
 
     df_sim = pd.DataFrame(sim_rows)
 
-    # 10年・20年・30年 マイルストーン表示
     st.markdown("#### 🎯 10年・20年・30年後の到達マイルストーン")
     m10 = df_sim[df_sim['年数_数値'] == 10].iloc[0]
     m20 = df_sim[df_sim['年数_数値'] == 20].iloc[0]
@@ -492,7 +468,6 @@ with tab3:
     mc2.metric("【20年後】総資産想定額", f"{m20['総資産想定額(円)']:,.0f} 円", f"うち運用益 +{m20['運用益合計(円)']:,.0f} 円")
     mc3.metric("【30年後】総資産想定額", f"{m30['総資産想定額(円)']:,.0f} 円", f"うち運用益 +{m30['運用益合計(円)']:,.0f} 円")
 
-    # 積み上げ棒グラフ（元本 vs 運用益）
     st.markdown("#### 📊 年次別 総資産推移グラフ（元本 ＋ 運用益）")
     fig_sim = go.Figure()
     fig_sim.add_trace(go.Bar(
@@ -512,7 +487,6 @@ with tab3:
     )
     st.plotly_chart(fig_sim, use_container_width=True)
 
-    # 年次別シミュレーション表（10年/20年/30年切り替え可能）
     st.markdown("#### 📋 年次別 総資産想定額 一覧表")
     view_span = st.radio("表示期間の切り替え", ["10年目まで", "20年目まで", "30年目まで（全期間）"], index=2, horizontal=True)
     max_y = 10 if "10" in view_span else (20 if "20" in view_span else 30)
@@ -569,7 +543,6 @@ with tab4:
             side_job_end_Option = st.selectbox("副業の継続期間", ["年金受給開始まで継続", "サイドFIRE後10年間のみ", "サイドFIRE後15年間のみ", "生涯継続"])
             pension_monthly = st.number_input("年金予定額（手取り月額・円）", min_value=0, max_value=1000000, value=150000, step=10000)
 
-    # --- 月次キャッシュフローシミュレーション計算 ---
     start_date = datetime(cur_year, cur_month, 1)
     fire_date = datetime(int(fire_year), int(fire_month), 1)
     pension_date = datetime(int(pension_year), int(pension_month), 1)
@@ -598,18 +571,14 @@ with tab4:
         if is_fired and asset_at_fire is None:
             asset_at_fire = asset_bal
 
-        # インフレ考慮後の生活費
         adj_living_cost = living_cost_monthly * ((1.0 + m_inflation) ** m)
 
         if not is_fired:
-            # サイドFIRE前（資産形成期）
             inv_gain = asset_bal * m_return
             asset_bal = asset_bal + inv_gain + pre_fire_saving
             y_saving += pre_fire_saving
             y_inv_gain += inv_gain
         else:
-            # サイドFIRE後
-            # 副業収入の判定
             months_since_fire = (curr_dt.year - fire_date.year) * 12 + (curr_dt.month - fire_date.month)
             active_side_job = True
             if side_job_end_Option == "年金受給開始まで継続" and is_pension:
@@ -622,7 +591,7 @@ with tab4:
             cur_side = side_income_monthly if active_side_job else 0.0
             cur_pen = pension_monthly if is_pension else 0.0
 
-            net_cashflow = cur_side + cur_pen - adj_living_cost  # マイナスなら資産取り崩し
+            net_cashflow = cur_side + cur_pen - adj_living_cost
             inv_gain = asset_bal * m_return if asset_bal > 0 else 0.0
             asset_bal = asset_bal + inv_gain + net_cashflow
 
@@ -634,11 +603,11 @@ with tab4:
             y_living_exp += adj_living_cost
             y_inv_gain += inv_gain
 
-        # 12ヶ月ごと（1年単位）に集計記録
         if (m + 1) % 12 == 0:
             year_num = (m + 1) // 12
             status_str = "積立期" if not is_fired else ("年金＋サイドFIRE" if is_pension else "サイドFIRE期")
             yearly_records.append({
+                '西暦_数値': curr_dt.year,
                 '西暦': f"{curr_dt.year}年",
                 '経過年': f"{year_num}年後",
                 'ステータス': status_str,
@@ -656,12 +625,11 @@ with tab4:
     if asset_at_fire is None:
         asset_at_fire = asset_bal
 
-    # --- 診断結果の表示 ---
     st.markdown("---")
     st.markdown("#### 🩺 サイドFIRE 実現可能性 判定結果")
 
     fire_gap_monthly = max(living_cost_monthly - side_income_monthly, 0)
-    required_fire_asset_4pct = fire_gap_monthly * 12 * 25  # 不足生活費の25年分（4%ルール基準）
+    required_fire_asset_4pct = fire_gap_monthly * 12 * 25
 
     if depletion_date is None and df_fire_sim.iloc[-1]['年末資産残高'] >= asset_at_fire:
         st.success(f"🎉 **【判定：大成功（余裕でサイドFIRE可能）】** {fire_year}年{fire_month}月にサイドFIREしても資産は一切枯渇せず、運用益が取り崩しを上回り資産が増え続けます！")
@@ -676,22 +644,35 @@ with tab4:
     fk3.metric("4%ルール上の必要目標資産", f"{required_fire_asset_4pct:,.0f} 円", f"過不足: {asset_at_fire - required_fire_asset_4pct:+,.0f} 円")
     fk4.metric(f"{sim_years_total}年後の最終資産残高", f"{df_fire_sim.iloc[-1]['年末資産残高']:,.0f} 円")
 
-    # 推移グラフ
+    # 推移グラフ（X軸に数値を使用してTypeErrorを防止）
     fig_fire = go.Figure()
     fig_fire.add_trace(go.Scatter(
-        x=df_fire_sim['西暦'], y=df_fire_sim['年末資産残高'],
+        x=df_fire_sim['西暦_数値'], y=df_fire_sim['年末資産残高'],
         mode='lines+markers', name='年末資産残高',
         fill='tozeroy', line=dict(color='#10b981', width=3)
     ))
-    fig_fire.add_vline(x=f"{fire_year}年", line_dash="dash", line_color="orange", annotation_text="サイドFIRE開始")
+    fig_fire.add_vline(
+        x=int(fire_year), line_dash="dash", line_color="orange",
+        annotation_text="サイドFIRE開始", annotation_position="top left"
+    )
     if pension_year <= cur_year + sim_years_total:
-        fig_fire.add_vline(x=f"{pension_year}年", line_dash="dash", line_color="blue", annotation_text="年金受給開始")
-    fig_fire.update_layout(title="サイドFIRE後の長期資産残高推移", xaxis_title="年", yaxis_title="資産残高（円）", hovermode="x unified")
+        fig_fire.add_vline(
+            x=int(pension_year), line_dash="dash", line_color="blue",
+            annotation_text="年金受給開始", annotation_position="top left"
+        )
+    fig_fire.update_layout(
+        title="サイドFIRE後の長期資産残高推移",
+        xaxis_title="年",
+        yaxis_title="資産残高（円）",
+        xaxis=dict(ticksuffix="年"),
+        hovermode="x unified"
+    )
     st.plotly_chart(fig_fire, use_container_width=True)
 
     st.markdown("##### 📋 年次別 キャッシュフロー＆資産推移表")
+    df_fire_table = df_fire_sim.drop(columns=['西暦_数値'])
     st.dataframe(
-        df_fire_sim.style.format({
+        df_fire_table.style.format({
             '年間積立額': '{:,.0f} 円',
             '年間副業収入': '{:,.0f} 円',
             '年間年金収入': '{:,.0f} 円',
@@ -705,7 +686,7 @@ with tab4:
     )
 
 # ==============================================================================
-# TAB 5: 暴落ストレステスト & 4%ルール生活費カバー率診断（追加プロ機能）
+# TAB 5: 暴落ストレステスト & 4%ルール生活費カバー率診断
 # ==============================================================================
 with tab5:
     st.subheader("⚡ プロ機能：暴落ストレステスト & 4%ルール診断")
