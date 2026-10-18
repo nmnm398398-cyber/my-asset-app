@@ -33,11 +33,11 @@ st.markdown("""
     max-width: 100% !important;
 }
 [data-testid="stMetricValue"] {
-    font-size: 1.65rem !important;
+    font-size: 1.6rem !important;
     line-height: 1.25 !important;
 }
 [data-testid="stMetricLabel"] {
-    font-size: 0.92rem !important;
+    font-size: 0.9rem !important;
     line-height: 1.3 !important;
 }
 </style>
@@ -46,7 +46,56 @@ st.markdown("""
 st.title("💎 資産管理 & サイドFIRE 統合シミュレーター")
 
 # ==============================================================================
-# 1. ユーティリティ & 金額フォーマット関数（「100k」表記を完全廃止）
+# 1. バックアップ用マスター辞書（通信制限・スクレイピング遮断時のフォールバック用）
+# ==============================================================================
+# Webから今期予想・直近実績が取得できた場合はWeb最新値が優先され、通信ブロック時のみ下記を使用
+FALLBACK_STOCK_DIV_MASTER = {
+    '8058': (100.0, '今期予想'),   # 三菱商事
+    '8316': (120.0, '今期予想'),   # 三井住友FG (3分割後基準)
+    '8306': (60.0,  '今期予想'),   # 三菱UFJ
+    '8411': (130.0, '今期予想'),   # みずほFG
+    '2914': (194.0, '今期予想'),   # JT
+    '8001': (200.0, '今期予想'),   # 伊藤忠商事
+    '8031': (100.0, '今期予想'),   # 三井物産 (2分割後基準)
+    '9432': (5.2,   '今期予想'),   # NTT
+    '9433': (75.0,  '今期予想'),   # KDDI (2分割後基準)
+    '9434': (8.6,   '今期予想'),   # ソフトバンク (10分割後基準)
+    '8766': (162.0, '今期予想'),   # 東京海上HD
+    '8591': (120.0, '今期予想'),   # オリックス
+    '7203': (90.0,  '今期予想'),   # トヨタ自動車
+    '4502': (196.0, '今期予想'),   # 武田薬品
+    '1928': (135.0, '今期予想'),   # 積水ハウス
+    '1489': (2250.0, '直近実績'),  # NEXT FUNDS 日経平均高配当株50指数連動型上場投信
+    '1577': (880.0,  '直近実績'),  # NEXT FUNDS 野村日本株高配当70連動型上場投信
+    '2558': (0.0,    '無配'),      # MAXIS米国株式(S&P500)上場投信
+    'VYM':  (3.75,   '直近実績'),  # USD
+    'SPYD': (1.85,   '直近実績'),  # USD
+    'HDV':  (4.10,   '直近実績'),  # USD
+    'JEPI': (4.30,   '直近実績'),  # USD
+    'JEPQ': (5.10,   '直近実績'),  # USD
+    'VIG':  (3.35,   '直近実績'),  # USD
+    'VOO':  (6.70,   '直近実績'),  # USD
+    'VTI':  (3.65,   '直近実績'),  # USD
+    'QQQ':  (2.85,   '直近実績'),  # USD
+    'AGG':  (3.60,   '直近実績'),  # USD
+    'BND':  (2.70,   '直近実績'),  # USD
+}
+
+# 代表的な分配型投資信託のフォールバック辞書（キーワード: (1万口あたり年間分配金[円], 分配金利回り目安[%], 入金月)）
+FALLBACK_TRUST_DIV_MASTER = [
+    ('SBI日本高配当株式', 410.0, 3.6, '1,4,7,10'),
+    ('楽天・高配当株式・米国ファンド', 380.0, 3.3, '2,5,8,11'),
+    ('楽天・米国高配当株式', 380.0, 3.3, '2,5,8,11'),
+    ('SBI・V・米国高配当株式', 350.0, 3.0, '2,5,8,11'),
+    ('SBI・iシェアーズ・米国高配当株式', 350.0, 3.0, '2,5,8,11'),
+    ('アライアンス・バーンスタイン・米国成長株投信Dコース', 2400.0, 18.0, '毎月'),
+    ('アライアンス・バーンスタイン・米国成長株投信Cコース', 2000.0, 16.0, '毎月'),
+    ('インベスコ 世界厳選株式オープン', 1800.0, 17.0, '毎月'),
+    ('ピクテ・グローバル・インカム株式', 360.0, 12.0, '毎月'),
+]
+
+# ==============================================================================
+# 2. ユーティリティ & 金額フォーマット関数（「100k」表記を完全廃止）
 # ==============================================================================
 
 def clean_num(val):
@@ -56,7 +105,7 @@ def clean_num(val):
     if isinstance(val, (int, float, np.number)):
         return float(val)
     s = unicodedata.normalize('NFKC', str(val))
-    for unit in [',', '円', '万円', '千円', '株', '口', 'USD', 'US$', '$', '%', '％', '+', ' ', ' ']:
+    for unit in [',', '円', '万円', '千円', '万口', '株', '口', 'USD', 'US$', '$', '%', '％', '+', ' ', ' ']:
         s = s.replace(unit, '')
     s = s.strip()
     if s in ['', '-', '--', '---', 'nan', 'None', 'N/A', '未定']:
@@ -98,10 +147,7 @@ def normalize_account(text):
     return None
 
 def is_investment_trust_row(name_str, code_str="", raw_qty_str="", type_str="", val_num=0.0, qty_num=0.0):
-    """
-    その行が『投資信託（1万口単位のファンド）』かどうかを厳密に判定する
-    （※投資信託の口数「数百万口」に個別株の1株配当を掛けて数億円になるバグを完全に防止）
-    """
+    """その行が『投資信託（1万口単位のファンド）』かどうかを厳密に判定する"""
     t_str = unicodedata.normalize('NFKC', str(type_str))
     if any(k in t_str for k in ['投資信託', '投信', 'ファンド', 'MMF']):
         return True
@@ -109,31 +155,27 @@ def is_investment_trust_row(name_str, code_str="", raw_qty_str="", type_str="", 
         return False
 
     c_str = unicodedata.normalize('NFKC', str(code_str)).strip().upper()
-    if c_str == "FUND_NO_DIV" or c_str == "FUND":
+    if c_str.startswith("FUND"):
         return True
+    if re.match(r'^[1-9][0-9]{2}[0-9A-Z]$', c_str):
+        return False
 
     n_str = unicodedata.normalize('NFKC', str(name_str)).strip()
     q_str = unicodedata.normalize('NFKC', str(raw_qty_str)).strip()
 
-    # 4桁の東証コードまたは明確な米国株ティッカーがコード列にある場合は株・ETF
-    if re.match(r'^[1-9][0-9]{2}[0-9A-Z]$', c_str):
-        return False
-
-    # 数量に「口」が含まれ、かつETF/REITでない場合は投資信託
     if '口' in q_str and 'ETF' not in n_str.upper() and '投資法人' not in n_str:
         return True
 
-    # 投資信託の代表的なキーワードを含む場合（ETFを除く）
     fund_keywords = [
         'eMAXIS', 'オルカン', 'オール・カントリー', 'インデックス', 'ファンド',
-        'スリム', 'たわら', 'ニッセイ', 'iFree', '楽天・', 'SBI・', 'ＳＢＩ・',
-        'ひふみ', 'プラス', 'つみたて', 'ノーロード', '投信', 'アライアンス', 'グロイン'
+        'スリム', 'たわら', 'ニッセイ', 'iFree', '楽天・', 'SBI・',
+        'ひふみ', 'プラス', 'つみたて', 'ノーロード', '投信', 'アライアンス',
+        'インベスコ', 'ピクテ', 'グロイン', '年4回決算', '毎月決算', '予想分配金'
     ]
     if any(k in n_str for k in fund_keywords) and 'ETF' not in n_str.upper():
         return True
 
-    # 【重要】価格比率チェック：投資信託は「1万口あたり1万〜5万円（＝1口あたり1〜5円）」のため、
-    # 保有数量が1万以上かつ「評価額 ÷ 保有数量」が25円未満なら100%投資信託（口数表記）
+    # 価格比率チェック：1口あたり25円未満（＝1万口あたり基準価額）なら投資信託
     if qty_num >= 10000 and val_num > 0 and (val_num / qty_num) < 25.0:
         return True
 
@@ -141,7 +183,7 @@ def is_investment_trust_row(name_str, code_str="", raw_qty_str="", type_str="", 
 
 def classify_asset_type(name, ticker, is_trust=False):
     """銘柄名とティッカーから資産クラスを自動分類"""
-    if is_trust or str(ticker) in ["FUND_NO_DIV", "FUND"]:
+    if is_trust or str(ticker).startswith("FUND"):
         return '投資信託'
     t = unicodedata.normalize('NFKC', str(ticker)).strip().upper()
     if re.match(r'^[1-9][0-9]{2}[0-9A-Z]$', t):
@@ -161,7 +203,7 @@ def is_fx_sensitive_asset(name, ticker, asset_class):
         return False
     if asset_class == '米国株・米国ETF':
         return True
-    if any(k in s for k in ['全世界', 'オール・カントリー', 'オルカン', '全米', '米国', 'S&P', '先進国', '新興国', 'NASDAQ', 'ナスダック', 'FANG', 'ダウ', '外国', 'グローバル']):
+    if any(k in s for k in ['全世界', 'オール・カントリー', 'オルカン', '全米', '米国', 'S&P', '先進国', '新興国', 'NASDAQ', 'ナスダック', 'FANG', 'ダウ', '外国', 'グローバル', '世界厳選']):
         return True
     if t in ['1655', '2558', '2559', '2631', '1545', '1557', '2568', '2569', '2633', '2634', '2244', '2013', '2014']:
         return True
@@ -170,8 +212,8 @@ def is_fx_sensitive_asset(name, ticker, asset_class):
 def get_tax_info(asset_class, account_type):
     """
     日米税制完全準拠の手取り率（1 - 税率）と税区分ラベルを返す
-    - 日本株・東証ETF（NISA）: 非課税（手取り 100.0%）
-    - 日本株・東証ETF（特定/一般）: 国内税20.315%控除（手取り 79.685%）
+    - 日本株・東証ETF・投信（NISA）: 非課税（手取り 100.0%）
+    - 日本株・東証ETF・投信（特定/一般）: 国内税20.315%控除（手取り 79.685%）
     - 米国株・米国ETF（NISA）: 米国現地課税10%控除（手取り 90.0%）
     - 米国株・米国ETF（特定/一般）: 米国現地課税10%控除後の90%に国内税20.315%控除（手取り 71.7165%）
     """
@@ -181,7 +223,7 @@ def get_tax_info(asset_class, account_type):
     if not is_us and is_nisa:
         return 1.0, "国内NISA (非課税・手取り100%)"
     elif not is_us and not is_nisa:
-        return 1.0 - 0.20315, "国内特定/一般 (税20.315%・手取り79.7%)"
+        return 1.0 - 0.20315, "国内特定/一般 (税20.315%控除・手取り79.7%)"
     elif is_us and is_nisa:
         return 0.90, "米国NISA (米国税10%控除・手取り90.0%)"
     else:
@@ -190,7 +232,7 @@ def get_tax_info(asset_class, account_type):
 def extract_ticker_from_text(name_str, code_str="", is_trust=False):
     """CSVの銘柄コード列または銘柄名から証券コード・ティッカーを正確に抽出"""
     if is_trust:
-        return "FUND_NO_DIV"
+        return "FUND"
 
     c = unicodedata.normalize('NFKC', str(code_str)).strip().upper()
     if c.endswith('.0'):
@@ -206,25 +248,21 @@ def extract_ticker_from_text(name_str, code_str="", is_trust=False):
 
     s = unicodedata.normalize('NFKC', str(name_str)).strip()
 
-    # 投資信託の判定を先に行う（「日経225」や「S&P500」などの数字を証券コードと誤認しないため）
-    if any(k in s for k in ['eMAXIS', 'オール・カントリー', 'オルカン', 'インデックス・ファンド', 'インデックスファンド', 'たわらノーロード', 'ニッセイ', 'iFree', '楽天・全米', '楽天・全世界', '楽天・プラス', 'SBI・V', 'SBI・iシェアーズ', 'ひふみ']) and 'ETF' not in s.upper():
-        return "FUND_NO_DIV"
+    if any(k in s for k in ['eMAXIS', 'オール・カントリー', 'オルカン', 'インデックス・ファンド', 'インデックスファンド', 'たわらノーロード', 'ニッセイ', 'iFree', '楽天・', 'SBI・', 'ひふみ', '投信']) and 'ETF' not in s.upper():
+        return "FUND"
 
-    # 1) 4桁の証券コード抽出（指数名 225, 500 や西暦 2024〜2035 等は除外）
-    exclude_4digits = {'2024', '2025', '2026', '2027', '2028', '2029', '2030', '1000', '2000', '3000', '5000', '2250', '5000'}
+    exclude_4digits = {'2024', '2025', '2026', '2027', '2028', '2029', '2030', '1000', '2000', '3000', '5000', '2250'}
     for m_jp in re.finditer(r'(?<![0-9A-Z/.-])([1-9][0-9]{2}[0-9A-Z])(?![0-9A-Z年/.-])', s.upper()):
         cand_code = m_jp.group(1)
         if cand_code not in exclude_4digits:
             return cand_code
 
-    # 2) カッコ内の米国ティッカー（例: (VYM), (SPYD), (AAPL)）
-    ignore_words = {'NISA', 'ETF', 'REIT', 'SPDR', 'MAXIS', 'SLIM', 'INDEX', 'FUND', 'NEXT', 'FUNDS', 'ISHARES', 'VANGUARD', 'CORE', 'HIGH', 'DIV', 'US', 'JP', 'NYSE', 'NASDAQ', ' S', ' P'}
+    ignore_words = {'NISA', 'ETF', 'REIT', 'SPDR', 'MAXIS', 'SLIM', 'INDEX', 'FUND', 'NEXT', 'FUNDS', 'ISHARES', 'VANGUARD', 'CORE', 'HIGH', 'DIV', 'US', 'JP', 'NYSE', 'NASDAQ'}
     m_us_paren = re.findall(r'[\(\[]([A-Z]{1,5})[\)\]]', s.upper())
     for cand in m_us_paren:
         if cand not in ignore_words:
             return cand
 
-    # 3) 空白区切りの米国ティッカー
     m_us_word = re.findall(r'\b([A-Z]{2,5})\b', s.upper())
     for cand in m_us_word:
         if cand not in ignore_words:
@@ -253,7 +291,7 @@ def fetch_usdjpy_rate():
 def default_pay_months(ticker):
     """履歴から入金月が特定できない場合の標準入金月"""
     t = str(ticker).upper()
-    if t in {"FUND_NO_DIV", "FUND", ""}:
+    if t.startswith("FUND") or not t:
         return "-"
     if t in {'JEPI', 'JEPQ', 'XYLD', 'QYLD', 'RYLD', 'AGG', 'BND', 'LQD', 'TLT', 'PFF', 'ARCC', 'MAIN', 'O'}:
         return "1,2,3,4,5,6,7,8,9,10,11,12"
@@ -270,16 +308,15 @@ def default_pay_months(ticker):
 def parse_pay_months_str(months_str):
     """'6,12' や '毎月' などの文字列から月番号(1〜12)のリストを返す"""
     s = str(months_str).strip()
-    if not s or s in ['-', '無配', 'nan', 'None']:
+    if not s or s in ['-', '無配', '無分配', 'nan', 'None']:
         return []
     if '毎月' in s or 'すべて' in s:
         return list(range(1, 13))
     nums = re.findall(r'\d+', s)
-    valid = sorted(list({int(m) for m in nums if 1 <= int(m) <= 12}))
-    return valid
+    return sorted(list({int(m) for m in nums if 1 <= int(m) <= 12}))
 
 # ==============================================================================
-# 2. 【核心】1株あたり配当金(DPS) 厳密取得エンジン（異常値ガードレール内蔵）
+# 3. 【核心】今期予想優先 ➔ 直近実績フォールバック（個別株・ETF・投資信託 完全対応）
 # ==============================================================================
 
 def _find_in_json(obj, target_key):
@@ -299,111 +336,239 @@ def _find_in_json(obj, target_key):
     return None
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit_price_yen=0.0):
-    """
-    1株あたり年間配当金（円換算DPS）と配当利回り(%)、入金月を厳密に取得する
-    - 投資信託やコード未特定銘柄に対して誤った銘柄コードを割り当てない
-    - 取得した1株配当が株価に対してありえない利回り（15%超）になる場合は異常値として自動排除・補正する
-    戻り値: (dps_yen, yield_pct, source_label, pay_months_str)
-    """
-    if not ticker or ticker in {"FUND_NO_DIV", "FUND"}:
-        return 0.0, 0.0, "投信(無配・再投資)", "-"
+def search_jp_ticker_by_name(stock_name):
+    """銘柄名しか記載がない場合、Yahoo!ファイナンス検索から4桁証券コードを特定する"""
+    clean_q = unicodedata.normalize('NFKC', str(stock_name))
+    clean_q = re.sub(r'[\(\[].*?[\)\]]', '', clean_q).replace('株式会社', '').strip()
+    if not clean_q or len(clean_q) < 2:
+        return ""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    try:
+        url = f"https://finance.yahoo.co.jp/search/?query={urllib.parse.quote(clean_q)}"
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as res:
+            html = res.read().decode('utf-8', errors='ignore')
+        m = re.search(r'/quote/([1-9][0-9]{2}[0-9A-Z])\.T', html)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
 
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_trust_distribution_data(fund_name, expected_nav=10000.0):
+    """
+    投資信託（ファンド）の分配金を調査する関数
+    - 無分配・再投資型インデックス投信（オルカン・S&P500等）は0円と高速判定
+    - 分配型投信はYahoo!ファイナンスの投信ページ等から「今期予想分配金」または「直近1年の実績分配金（1万口あたり）」を取得
+    戻り値: (dist_per_10k_yen, yield_pct, basis_type, source_label, pay_months_str)
+    """
+    s = unicodedata.normalize('NFKC', str(fund_name)).strip()
+
+    # 1) 代表的な無分配型インデックス投信の即時判定
+    no_dist_keywords = [
+        'eMAXIS Slim', 'eMAXIS', 'オール・カントリー', 'オルカン', 'たわらノーロード',
+        'ニッセイ', 'iFree', '楽天・全米株式', '楽天・全世界株式', '楽天・プラス',
+        '楽天・S&P500', 'SBI・V・S&P500', 'SBI・V・全米', 'SBI・V・全世界', 'ひふみ'
+    ]
+    is_explicit_dist = any(k in s for k in ['分配', '年4回', '年2回', '四半期', '毎月', 'Cコース', 'Dコース', 'インカム'])
+    if any(k in s for k in no_dist_keywords) and not is_explicit_dist:
+        return 0.0, 0.0, "無分配(再投資)", "投信実績(0円)", "-"
+
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+    # 2) Yahoo!ファイナンスで投資信託コード(8桁: 例 0331418A / 89311199)を検索して分配金データを取得
+    try:
+        q_str = re.sub(r'[（\(\[【].*?[）\)\]】]', ' ', s).strip()
+        url_search = f"https://finance.yahoo.co.jp/search/?query={urllib.parse.quote(q_str[:30])}"
+        req_s = urllib.request.Request(url_search, headers=headers)
+        with urllib.request.urlopen(req_s, timeout=4) as res_s:
+            html_s = res_s.read().decode('utf-8', errors='ignore')
+
+        m_fcode = re.search(r'/quote/([0-9]{7}[0-9A-Z]|[0-9]{8})(?:"|\?|\s|/)', html_s)
+        if m_fcode:
+            fcode = m_fcode.group(1)
+            url_q = f"https://finance.yahoo.co.jp/quote/{fcode}"
+            req_q = urllib.request.Request(url_q, headers=headers)
+            with urllib.request.urlopen(req_q, timeout=5) as res_q:
+                html_q = res_q.read().decode('utf-8', errors='ignore')
+
+            nav_price = expected_nav if expected_nav >= 1000 else 10000.0
+            dist_annual = None
+            dist_yield = None
+
+            m_state = re.search(r'window\.__PRELOADED_STATE__\s*=\s*(\{.*?\});?\s*</script>', html_q, re.DOTALL)
+            if m_state:
+                state_data = json.loads(m_state.group(1))
+                # 基準価額
+                pb = _find_in_json(state_data, "fundPriceBoard") or _find_in_json(state_data, "priceBoard")
+                if isinstance(pb, dict):
+                    p_v = clean_num(pb.get("price", 0))
+                    if p_v >= 500:
+                        nav_price = p_v
+                # 分配金利回り・直近分配金合計
+                ref = _find_in_json(state_data, "fundReferenceIndex") or _find_in_json(state_data, "referenceIndex")
+                if isinstance(ref, dict):
+                    y_obj = ref.get("distributionYield") or ref.get("dividendYield")
+                    if isinstance(y_obj, dict):
+                        yv = clean_num(y_obj.get("value", 0))
+                        if 0 <= yv <= 30.0:
+                            dist_yield = round(yv, 2)
+                    d_obj = ref.get("annualDistribution") or ref.get("distribution")
+                    if isinstance(d_obj, dict):
+                        dv = clean_num(d_obj.get("value", 0))
+                        if 0 <= dv <= 30000:
+                            dist_annual = dv
+
+            # HTMLテキストからのフォールバック抽出
+            clean_txt = unicodedata.normalize('NFKC', re.sub(r'<[^>]+>', ' ', html_q))
+            if dist_yield is None:
+                m_dy = re.search(r'分配金利回り[^\d]*([0-9]{1,2}\.[0-9]{1,2})\s*%', clean_txt)
+                if m_dy:
+                    dist_yield = float(m_dy.group(1))
+
+            if dist_annual is not None and dist_annual > 0:
+                y_out = dist_yield if (dist_yield and dist_yield > 0) else round(dist_annual / nav_price * 100.0, 2)
+                pay_m = "毎月" if "毎月" in s else ("1,4,7,10" if any(k in s for k in ['年4回', '四半期']) else "6,12")
+                return round(dist_annual, 2), y_out, "直近実績(投信)", f"Yahoo投信({fcode})", pay_m
+
+            if dist_yield is not None and dist_yield > 0:
+                d_calc = round(nav_price * (dist_yield / 100.0), 2)
+                pay_m = "毎月" if "毎月" in s else ("1,4,7,10" if any(k in s for k in ['年4回', '四半期']) else "6,12")
+                return d_calc, dist_yield, "直近実績(投信)", f"Yahoo投信利回り({fcode})", pay_m
+
+            if dist_annual == 0.0 or dist_yield == 0.0:
+                return 0.0, 0.0, "無分配(再投資)", f"Yahoo投信({fcode}:0円)", "-"
+    except Exception:
+        pass
+
+    # 3) フォールバック辞書照合（代表的な分配型ファンド）
+    for kw, dist_val, y_val, pm_str in FALLBACK_TRUST_DIV_MASTER:
+        if kw in s:
+            return dist_val, y_val, "直近実績(投信)", f"投信マスター({kw})", pm_str
+
+    return 0.0, 0.0, "無分配(再投資)", "投信(0円・手動入力可)", "-"
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit_price_yen=0.0, is_trust=False):
+    """
+    【核心ルール】
+    - 今期予想が出ていれば（＞0円なら）「今期予想額」を最優先で採用
+    - 今期予想がなければ（0円・未定・ETF・米国株など）「直近実績額（前期実績または直近1年実績合計）」を採用
+    - 投資信託の分配金も同様に調査
+    戻り値: (dps_yen, yield_pct, basis_type, source_label, pay_months_str, current_price_yen)
+    """
+    if is_trust or str(ticker).startswith("FUND"):
+        d_val, y_val, b_type, src_lbl, pm = fetch_trust_distribution_data(stock_name, expected_unit_price_yen)
+        return d_val, y_val, b_type, src_lbl, pm, expected_unit_price_yen
+
+    if not ticker:
+        ticker = search_jp_ticker_by_name(stock_name)
+    if not ticker:
+        return 0.0, 0.0, "未特定", "コード未特定(手動入力可)", "6,12", expected_unit_price_yen
+
+    t_upper = ticker.upper()
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-    is_jp = bool(re.match(r'^[1-9][0-9]{2}[0-9A-Z]$', ticker))
-    yf_symbol = f"{ticker}.T" if is_jp else ticker
+    is_jp = bool(re.match(r'^[1-9][0-9]{2}[0-9A-Z]$', t_upper))
+    yf_symbol = f"{t_upper}.T" if is_jp else t_upper
 
-    jp_dps_yen = None
-    jp_forecast_yield = None
-    jp_price = None
-    jp_source_label = ""
+    forecast_dps_yen = None
+    forecast_yield = None
+    forecast_src = ""
 
-    # --- ソース1: Yahoo!ファイナンス日本版の内部JSON (__PRELOADED_STATE__) から正確に抽出 ---
+    actual_dps_yen = None
+    actual_yield = None
+    actual_src = ""
+
+    detected_price_yen = None
+    pay_months_str = default_pay_months(t_upper)
+
+    # ==========================================================================
+    # A. 日本株・東証ETF: Yahoo!ファイナンス日本版 & 株探 (Kabutan) から
+    #    「①今期予想」と「②前期実績」の両方を調査
+    # ==========================================================================
     if is_jp:
+        # --- 1) Yahoo!ファイナンス日本版（会社予想1株配当・分配金） ---
         try:
-            url_jp = f"https://finance.yahoo.co.jp/quote/{ticker}.T"
+            url_jp = f"https://finance.yahoo.co.jp/quote/{t_upper}.T"
             req = urllib.request.Request(url_jp, headers=headers)
             with urllib.request.urlopen(req, timeout=5) as res:
                 html = res.read().decode('utf-8', errors='ignore')
 
             m_state = re.search(r'window\.__PRELOADED_STATE__\s*=\s*(\{.*?\});?\s*</script>', html, re.DOTALL)
             if m_state:
-                try:
-                    state_data = json.loads(m_state.group(1))
-                    ref_idx = _find_in_json(state_data, "referenceIndex")
-                    if isinstance(ref_idx, dict):
-                        # 1株配当（会社予想）
-                        dps_obj = ref_idx.get("dps")
-                        if isinstance(dps_obj, dict):
-                            dps_v = clean_num(dps_obj.get("value", 0))
-                            if 0 < dps_v < 20000:
-                                jp_dps_yen = dps_v
-                        # 配当利回り（会社予想）
-                        yld_obj = ref_idx.get("dividendYield") or ref_idx.get("distributionYield")
-                        if isinstance(yld_obj, dict):
-                            yld_v = clean_num(yld_obj.get("value", 0))
-                            if 0 < yld_v <= 15.0:
-                                jp_forecast_yield = round(yld_v, 2)
-                    # 現在株価
-                    pb = _find_in_json(state_data, "priceBoard")
-                    if isinstance(pb, dict):
-                        p_v = clean_num(pb.get("price", 0))
-                        if p_v > 0:
-                            jp_price = p_v
-                    if jp_dps_yen is not None or jp_forecast_yield is not None:
-                        jp_source_label = f"Yahoo会社予想({ticker}.T)"
-                except Exception:
-                    pass
+                state_data = json.loads(m_state.group(1))
+                pb = _find_in_json(state_data, "priceBoard")
+                if isinstance(pb, dict):
+                    p_v = clean_num(pb.get("price", 0))
+                    if p_v > 0:
+                        detected_price_yen = p_v
+
+                ref_idx = _find_in_json(state_data, "referenceIndex")
+                if isinstance(ref_idx, dict):
+                    # 1株配当（会社予想）
+                    dps_obj = ref_idx.get("dps")
+                    if isinstance(dps_obj, dict):
+                        dps_v = clean_num(dps_obj.get("value", 0))
+                        if 0 < dps_v < 30000:
+                            forecast_dps_yen = dps_v
+                            forecast_src = f"Yahoo今期予想({t_upper}.T)"
+                    # 配当利回り（会社予想）またはETF分配金利回り
+                    yld_obj = ref_idx.get("dividendYield") or ref_idx.get("distributionYield")
+                    if isinstance(yld_obj, dict):
+                        yld_v = clean_num(yld_obj.get("value", 0))
+                        if 0 < yld_v <= 18.0:
+                            forecast_yield = round(yld_v, 2)
+                            if not forecast_src:
+                                forecast_src = f"Yahoo予想利回り({t_upper}.T)"
         except Exception:
             pass
 
-    # --- ソース2: 株探 (Kabutan) のHTMLテーブル構造から正確に抽出 ---
-    if is_jp and (jp_dps_yen is None or jp_forecast_yield is None):
+        # --- 2) 株探 (Kabutan) から「今期予想1株配」と「前期実績1株配」を取得 ---
         try:
-            url_kb = f"https://kabutan.jp/stock/?code={ticker}"
+            url_kb = f"https://kabutan.jp/stock/?code={t_upper}"
             req_kb = urllib.request.Request(url_kb, headers=headers)
             with urllib.request.urlopen(req_kb, timeout=5) as res_kb:
                 html_kb = res_kb.read().decode('utf-8', errors='ignore')
 
-            # 1) 現在株価 (<span class="kabuka">2,850円</span>)
             m_kabuka = re.search(r'<span class="kabuka">([0-9,]+(?:\.[0-9]+)?)円</span>', html_kb)
-            if m_kabuka and jp_price is None:
-                jp_price = clean_num(m_kabuka.group(1))
+            if m_kabuka and detected_price_yen is None:
+                detected_price_yen = clean_num(m_kabuka.group(1))
 
-            # 2) <div id="stockinfo_i3"> 内の3番目の <td>（予想利回り）
             m_i3 = re.search(r'<div id="stockinfo_i3">(.*?)</div>', html_kb, re.DOTALL)
-            if m_i3 and jp_forecast_yield is None:
+            if m_i3 and forecast_yield is None:
                 tds = re.findall(r'<td[^>]*>(.*?)</td>', m_i3.group(1), re.DOTALL)
                 if len(tds) >= 3:
                     y_cand = clean_num(re.sub(r'<[^>]+>', '', tds[2]))
-                    if 0 < y_cand <= 15.0:
-                        jp_forecast_yield = round(y_cand, 2)
-                        if not jp_source_label:
-                            jp_source_label = f"株探予想({ticker})"
+                    if 0 < y_cand <= 18.0:
+                        forecast_yield = round(y_cand, 2)
 
-            # 3) 業績テーブルの「予」行の <td> タグから「修正1株配」（後ろから2番目のtd）を厳密抽出
-            if jp_dps_yen is None:
-                for tr_html in re.findall(r'<tr[^>]*>(.*?)</tr>', html_kb, re.DOTALL):
-                    if '予' in tr_html and ('2025.' in tr_html or '2026.' in tr_html or '2027.' in tr_html):
-                        td_list = [re.sub(r'<[^>]+>', '', td).strip() for td in re.findall(r'<td[^>]*>(.*?)</td>', tr_html, re.DOTALL)]
-                        # 株探の通期業績行は [売上, 営業益, 経常益, 最終益, 修正1株益, 修正1株配, 発表日] の7つのtdを持つ
-                        if len(td_list) >= 6:
-                            dps_str = td_list[-2]  # 発表日の1つ前が必ず「修正1株配」
-                            dps_cand = clean_num(dps_str)
-                            if 0 < dps_cand < 10000:
-                                jp_dps_yen = dps_cand
-                                if not jp_source_label:
-                                    jp_source_label = f"株探予想1株配({ticker})"
-                                break
+            # 業績テーブルの全行から「前期実績行」と「今期予想行（予）」の修正1株配を抽出
+            perf_rows = []
+            for tr_html in re.findall(r'<tr[^>]*>(.*?)</tr>', html_kb, re.DOTALL):
+                if re.search(r'202[3-8]\.[0-1][0-9]', tr_html):
+                    th_txt = "".join(re.sub(r'<[^>]+>', '', th).strip() for th in re.findall(r'<th[^>]*>(.*?)</th>', tr_html, re.DOTALL))
+                    td_list = [re.sub(r'<[^>]+>', '', td).strip() for td in re.findall(r'<td[^>]*>(.*?)</td>', tr_html, re.DOTALL)]
+                    if len(td_list) >= 6:
+                        dps_cell = clean_num(td_list[-2])  # 後ろから2番目が「修正1株配」
+                        is_est = ('予' in th_txt)
+                        perf_rows.append((is_est, dps_cell))
+
+            for is_est, dps_cell in perf_rows:
+                if is_est and dps_cell > 0 and dps_cell < 30000:
+                    if forecast_dps_yen is None:
+                        forecast_dps_yen = dps_cell
+                        forecast_src = f"株探今期予想({t_upper})"
+                elif not is_est and dps_cell > 0 and dps_cell < 30000:
+                    # 最新の通期実績を上書き保持（ループの最後が直近前期実績になる）
+                    actual_dps_yen = dps_cell
+                    actual_src = f"株探前期実績({t_upper})"
         except Exception:
             pass
 
-    # --- ソース3: Yahoo Finance Chart API (米国株DPS・東証ETF分配金・権利確定月) ---
-    api_dps_native = None
-    api_price_native = None
-    api_yield = None
-    pay_months_str = default_pay_months(ticker)
-
+    # ==========================================================================
+    # B. Yahoo Finance Chart API (直近1年間の実績配当合計・米国株・東証ETF・入金月)
+    # ==========================================================================
     try:
         url_api = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(yf_symbol)}?range=1y&interval=1d&events=div,split"
         req = urllib.request.Request(url_api, headers=headers)
@@ -414,13 +579,19 @@ def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit
         if result:
             meta = result[0].get('meta', {})
             api_price_native = float(meta.get('regularMarketPrice', 0.0))
+            if api_price_native > 0:
+                if is_jp and detected_price_yen is None:
+                    detected_price_yen = api_price_native
+                elif not is_jp:
+                    detected_price_yen = api_price_native * usdjpy
+
             events = result[0].get('events', {})
             divs = events.get('dividends', {})
             splits = events.get('splits', {})
 
             if divs:
                 div_items = sorted(divs.values(), key=lambda x: int(x.get('date', 0)))
-                # 前年同月の重複配当（年2回で3回分、年4回で5回分など）を除外
+                # 前年同月の重複配当（年2回で3回分、年4回で5回分入っているケース）を除外
                 if len(div_items) in (3, 5, 13):
                     first_m = datetime.fromtimestamp(int(div_items[0].get('date', 0))).month
                     last_m = datetime.fromtimestamp(int(div_items[-1].get('date', 0))).month
@@ -436,7 +607,7 @@ def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit
                         split_events.append((int(sp.get('date', 0)), num / den))
 
                 ex_months = set()
-                total_div = 0.0
+                total_div_native = 0.0
 
                 for d_obj in div_items:
                     ts = int(d_obj.get('date', 0))
@@ -448,80 +619,82 @@ def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit
                             if post_divs and post_divs[-1] > 0:
                                 if (d_amt / post_divs[-1]) > (ratio * 0.65):
                                     d_amt = d_amt / ratio
-                            elif api_price_native and api_price_native > 0:
+                            elif api_price_native > 0:
                                 if (d_amt * 2.0 / api_price_native * 100.0) > 9.0:
                                     d_amt = d_amt / ratio
 
-                    total_div += d_amt
+                    total_div_native += d_amt
                     if ts > 0:
                         m_num = datetime.fromtimestamp(ts).month
-                        if is_jp:
-                            pay_m = ((m_num + 3 - 1) % 12) + 1
-                            ex_months.add(pay_m)
-                        else:
-                            ex_months.add(m_num)
+                        ex_months.add(((m_num + 3 - 1) % 12) + 1 if is_jp else m_num)
 
                 if ex_months:
                     pay_months_str = ",".join(str(m) for m in sorted(list(ex_months)))
 
-                if total_div > 0:
-                    api_dps_native = total_div
-                    if api_price_native and api_price_native > 0:
-                        calc_yield = (total_div / api_price_native) * 100.0
-                        if 0 < calc_yield <= 15.0:
-                            api_yield = round(calc_yield, 2)
-            elif api_price_native and api_price_native > 0 and not divs:
-                api_dps_native = 0.0
-                api_yield = 0.0
+                if total_div_native > 0:
+                    if is_jp:
+                        if actual_dps_yen is None:
+                            actual_dps_yen = round(total_div_native, 2)
+                            actual_src = f"直近1年実績({t_upper}.T)"
+                        if api_price_native > 0:
+                            actual_yield = round(actual_dps_yen / api_price_native * 100.0, 2)
+                    else:
+                        actual_dps_yen = round(total_div_native * usdjpy, 2)
+                        actual_src = f"米国直近実績({yf_symbol}: ${total_div_native:.2f}/株)"
+                        if api_price_native > 0:
+                            actual_yield = round(total_div_native / api_price_native * 100.0, 2)
     except Exception:
         pass
 
-    # --- 4. 株価と利回りの整合性チェック（異常値ガードレール） ---
-    ref_price_yen = jp_price or api_price_native or expected_unit_price_yen
+    ref_price_yen = detected_price_yen or expected_unit_price_yen
 
-    if is_jp:
-        # もし取得したjp_dps_yenが株価に対して利回り15%を超える異常値なら棄却する
-        if jp_dps_yen is not None and ref_price_yen and ref_price_yen > 0:
-            if (jp_dps_yen / ref_price_yen * 100.0) > 15.0:
-                jp_dps_yen = None
-
-        # 会社予想利回りが取得できており、1株配当が未取得（または棄却）の場合は株価×利回りから1株配当を算出
-        if jp_dps_yen is None and jp_forecast_yield is not None and jp_forecast_yield > 0 and ref_price_yen and ref_price_yen > 0:
-            jp_dps_yen = round(ref_price_yen * (jp_forecast_yield / 100.0), 2)
-
-        if jp_dps_yen is not None and jp_dps_yen > 0:
-            y_out = jp_forecast_yield if (jp_forecast_yield is not None and jp_forecast_yield > 0) else (
-                round(jp_dps_yen / ref_price_yen * 100.0, 2) if (ref_price_yen and ref_price_yen > 0) else 0.0
+    # ==========================================================================
+    # C. 【優先順位の適用】① 今期予想 (＞0円) ➔ ② 直近実績 (＞0円) ➔ ③ バックアップ辞書
+    # ==========================================================================
+    # 1) 今期予想1株配当が取得できている場合（異常利回り18%超でないかも検証）
+    if forecast_dps_yen is not None and forecast_dps_yen > 0:
+        if not (ref_price_yen and ref_price_yen > 0 and (forecast_dps_yen / ref_price_yen * 100.0) > 18.0):
+            y_out = forecast_yield if (forecast_yield and forecast_yield > 0) else (
+                round(forecast_dps_yen / ref_price_yen * 100.0, 2) if (ref_price_yen and ref_price_yen > 0) else 0.0
             )
-            return round(jp_dps_yen, 2), y_out, jp_source_label, pay_months_str
+            return round(forecast_dps_yen, 2), y_out, "今期予想", forecast_src, pay_months_str, (ref_price_yen or 0.0)
 
-        # 東証ETFなど会社予想がない銘柄はAPIの直近1年分配金実績を採用
-        if api_dps_native is not None and api_dps_native > 0:
-            if ref_price_yen and ref_price_yen > 0 and (api_dps_native / ref_price_yen * 100.0) <= 15.0:
-                return round(api_dps_native, 2), (api_yield or round(api_dps_native / ref_price_yen * 100.0, 2)), f"直近分配実績({ticker}.T)", pay_months_str
+    # 2) 今期予想利回りだけがあり、現在株価から今期予想1株配当を算出できる場合
+    if forecast_yield is not None and forecast_yield > 0 and ref_price_yen and ref_price_yen > 0:
+        dps_calc = round(ref_price_yen * (forecast_yield / 100.0), 2)
+        return dps_calc, forecast_yield, "今期予想", forecast_src, pay_months_str, ref_price_yen
 
-        return 0.0, 0.0, f"無配({ticker}.T)", "-"
+    # 3) 今期予想がない（0円・未定・ETF・米国株）場合 ➔ 直近実績を採用！
+    if actual_dps_yen is not None and actual_dps_yen > 0:
+        if not (ref_price_yen and ref_price_yen > 0 and (actual_dps_yen / ref_price_yen * 100.0) > 20.0):
+            y_out = actual_yield if (actual_yield and actual_yield > 0) else (
+                round(actual_dps_yen / ref_price_yen * 100.0, 2) if (ref_price_yen and ref_price_yen > 0) else 0.0
+            )
+            return round(actual_dps_yen, 2), y_out, "直近実績", actual_src, pay_months_str, (ref_price_yen or 0.0)
 
-    else:
-        # 米国株・米国ETF：1株配当(USD) × ドル円レート ＝ 1株配当(円)
-        if api_dps_native is not None and api_dps_native > 0:
-            dps_yen_us = round(api_dps_native * usdjpy, 2)
-            y_us = api_yield or (round(dps_yen_us / expected_unit_price_yen * 100.0, 2) if expected_unit_price_yen > 0 else 0.0)
-            if y_us <= 18.0:
-                return dps_yen_us, y_us, f"米国実績({yf_symbol}: ${api_dps_native:.2f}/株)", pay_months_str
-        return 0.0, 0.0, f"無配({yf_symbol})", "-"
+    # 4) 通信ブロック等で両方取れなかった場合のみ、内蔵フォールバック辞書を参照
+    if t_upper in FALLBACK_STOCK_DIV_MASTER:
+        fb_val, fb_type = FALLBACK_STOCK_DIV_MASTER[t_upper]
+        if fb_val > 0:
+            dps_fb = fb_val if is_jp else round(fb_val * usdjpy, 2)
+            y_fb = round(dps_fb / ref_price_yen * 100.0, 2) if (ref_price_yen and ref_price_yen > 0) else 0.0
+            return dps_fb, y_fb, fb_type, f"マスター({t_upper})", pay_months_str, (ref_price_yen or 0.0)
+
+    return 0.0, 0.0, "無配(0円)", f"無配/未取得({t_upper})", "-", (ref_price_yen or 0.0)
 
 def enrich_with_latest_dividends(df, usdjpy=150.0):
-    """DataFrameの全銘柄に対して並列で『1株配当(円)』『最新利回り(%)』『入金月』を自動付与する"""
+    """DataFrameの全銘柄に対して並列で『1株/1万口配当(円)』『採用基準(今期予想/直近実績)』『入金月』を自動付与する"""
     if df.empty:
         return df
 
     df = df.copy()
-    for col, default_v in [('銘柄コード', ''), ('保有数量', 0.0), ('1株配当(円)', 0.0), ('配当利回り(%)', 0.0), ('配当入金月', ''), ('配当ソース', ''), ('資産クラス', '')]:
+    for col, default_v in [
+        ('銘柄コード', ''), ('保有数量', 0.0), ('1株配当(円)', 0.0),
+        ('配当利回り(%)', 0.0), ('採用基準', ''), ('配当入金月', ''), ('配当ソース', ''), ('資産クラス', '')
+    ]:
         if col not in df.columns:
             df[col] = default_v
 
-    # 投資信託判定と銘柄コードの整理
     tickers = []
     asset_classes = []
     for _, row in df.iterrows():
@@ -533,7 +706,7 @@ def enrich_with_latest_dividends(df, usdjpy=150.0):
         t = extract_ticker_from_text(row.get('銘柄名', ''), row.get('銘柄コード', ''), is_trust=is_tr)
         a_cls = classify_asset_type(row.get('銘柄名', ''), t, is_trust=is_tr)
         if a_cls == '投資信託':
-            t = "FUND_NO_DIV"
+            t = "FUND"
         tickers.append(t)
         asset_classes.append(a_cls)
 
@@ -542,45 +715,43 @@ def enrich_with_latest_dividends(df, usdjpy=150.0):
 
     tasks = []
     for idx, row in df.iterrows():
-        if row['資産クラス'] == '投資信託':
-            df.at[idx, '1株配当(円)'] = 0.0
-            df.at[idx, '配当利回り(%)'] = 0.0
-            df.at[idx, '配当入金月'] = '-'
-            df.at[idx, '配当ソース'] = '投信(再投資)'
-            continue
-
         cur_dps = clean_num(row.get('1株配当(円)', 0.0))
-        cur_y = clean_num(row.get('配当利回り(%)', 0.0))
         cur_src = str(row.get('配当ソース', ''))
         cur_pm = str(row.get('配当入金月', ''))
         val_n = clean_num(row.get('評価額', 0.0))
         qty_n = clean_num(row.get('保有数量', 0.0))
-        unit_p = (val_n / qty_n) if qty_n > 0 else 0.0
+        is_tr = (row['資産クラス'] == '投資信託')
 
-        if cur_dps <= 0 or cur_pm == "":
-            tasks.append((idx, row['銘柄コード'], row['銘柄名'], cur_dps, cur_y, cur_src, cur_pm, unit_p))
+        if is_tr:
+            unit_p = (val_n / (qty_n / 10000.0)) if qty_n >= 1000 else 10000.0
+        else:
+            unit_p = (val_n / qty_n) if qty_n > 0 else 0.0
+
+        if not (cur_dps > 0 and cur_src == "手動/保存"):
+            tasks.append((idx, row['銘柄コード'], row['銘柄名'], cur_dps, cur_src, cur_pm, unit_p, is_tr, val_n, qty_n))
 
     if tasks:
         def _worker(task):
-            idx, t_code, s_name, cur_dps, cur_y, cur_src, cur_pm, unit_p = task
-            dps_val, y_val, src_label, pay_m = fetch_exact_dividend_data(t_code, s_name, usdjpy, unit_p)
-            final_dps = cur_dps if (cur_dps > 0 and cur_src == "手動/保存") else dps_val
-            final_y = cur_y if (cur_y > 0 and cur_src == "手動/保存") else y_val
-            # もし1株配当が0でも利回りと単価がある場合は1株配当を自動算出して①方式に統一
-            if final_dps <= 0 and final_y > 0 and unit_p > 0:
-                final_dps = round(unit_p * (final_y / 100.0), 2)
-            final_src = cur_src if (cur_dps > 0 and cur_src == "手動/保存") else src_label
+            idx, t_code, s_name, cur_dps, cur_src, cur_pm, unit_p, is_tr, val_n, qty_n = task
+            dps_val, y_val, basis_t, src_label, pay_m, price_yen = fetch_exact_dividend_data(t_code, s_name, usdjpy, unit_p, is_tr)
             final_pm = cur_pm if cur_pm not in ["", "nan", "None"] else pay_m
-            return idx, final_dps, final_y, final_src, final_pm
+            # もしCSVから保有株数が0で読み込まれていた場合、評価額÷現在株価から保有株数を自動復元
+            restored_qty = qty_n
+            if not is_tr and qty_n <= 0 and val_n > 0 and price_yen > 0:
+                restored_qty = float(round(val_n / price_yen))
+            return idx, dps_val, y_val, basis_t, src_label, final_pm, restored_qty
 
         with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(_worker, tasks))
 
-        for idx, final_dps, final_y, final_src, final_pm in results:
-            df.at[idx, '1株配当(円)'] = final_dps
-            df.at[idx, '配当利回り(%)'] = final_y
-            df.at[idx, '配当ソース'] = final_src
+        for idx, dps_val, y_val, basis_t, src_label, final_pm, restored_qty in results:
+            df.at[idx, '1株配当(円)'] = dps_val
+            df.at[idx, '配当利回り(%)'] = y_val
+            df.at[idx, '採用基準'] = basis_t
+            df.at[idx, '配当ソース'] = src_label
             df.at[idx, '配当入金月'] = final_pm
+            if restored_qty > 0 and clean_num(df.at[idx, '保有数量']) <= 0:
+                df.at[idx, '保有数量'] = restored_qty
 
     df['為替影響'] = [
         "米ドル連動(為替影響あり)" if is_fx_sensitive_asset(r['銘柄名'], r['銘柄コード'], r['資産クラス']) else "円建て(為替影響なし)"
@@ -590,11 +761,10 @@ def enrich_with_latest_dividends(df, usdjpy=150.0):
 
 def calc_exact_annual_dividend(df):
     """
-    【方式①完全統一】『保有株数 × 1株配当(円)』による配当金の厳密計算関数
-    - 投資信託は0円（再投資）
-    - 個別株・ETFはすべて『保有数量(株) × 1株配当(円)』で税引前配当金を算出
-    - 万が一、算出された配当金が評価額の15%を超える場合（単位異常など）は安全ガードで補正
-    - 税金は「税引前（額面100%）」と「税引後（米国税10%＋国内税20.315%控除）」の2パターンを同時算出
+    【方式①完全統一】
+    - 個別株・ETF：『保有株数 × 1株あたり年間配当金(円)』
+    - 投資信託：『(保有口数 ÷ 10,000) × 1万口あたり年間分配金(円)』
+    - 税金は「税引前（額面100%）」と「税引後（米国税10%＋国内税20.315%控除）」の2パターンを常時算出
     """
     if df.empty:
         return df
@@ -610,39 +780,49 @@ def calc_exact_annual_dividend(df):
         dps = clean_num(row.get('1株配当(円)', 0.0))
         val = clean_num(row.get('評価額', 0.0))
         y_pct = clean_num(row.get('配当利回り(%)', 0.0))
+        b_type = str(row.get('採用基準', '')) or "今期予想/実績"
 
         if asset_cls == '投資信託':
-            ann_pre = 0.0
-            method_str = "投資信託 (分配金再投資 / 0円)"
-            eff_y = 0.0
-        else:
-            # 1株配当が未設定で利回り(%)だけある場合は単価から1株配当を逆算
-            if dps <= 0 and y_pct > 0 and qty > 0 and val > 0:
-                dps = round((val / qty) * (y_pct / 100.0), 2)
-                df.at[idx, '1株配当(円)'] = dps
+            if dps > 0:
+                # 投資信託の口数が1口単位（例: 1,500,000口）か万口単位かを判定して「万口数」に変換
+                if qty >= 10000 and val > 0 and (val / qty) < 25.0:
+                    man_kuchi = qty / 10000.0
+                elif qty > 0 and val > 0 and 0.5 <= (val / (qty * 10000.0)) <= 10.0:
+                    man_kuchi = qty
+                else:
+                    # 基準価額を1万口＝10,000円相当として万口数を推計、または利回りから算出
+                    man_kuchi = (val / 10000.0) if val > 0 else 0.0
 
+                ann_pre = round(man_kuchi * dps)
+                eff_y = (ann_pre / val * 100.0) if val > 0 else y_pct
+                method_str = f"① {man_kuchi:,.1f}万口 × {dps:,.0f}円/万口 ({b_type})"
+            else:
+                ann_pre = 0.0
+                eff_y = 0.0
+                method_str = "無分配 (0円 / 再投資型)"
+        else:
             if qty > 0 and dps > 0:
                 ann_pre = round(qty * dps)
                 eff_y = (ann_pre / val * 100.0) if val > 0 else y_pct
-                # 【最終安全ガードレール】万が一、利回りが18%を超える異常値になった場合は口数誤認とみなして0円にリセット
-                if val > 0 and eff_y > 18.0:
+                # 異常値ガードレール（万が一、利回り20%超の桁ズレがあれば自動補正）
+                if val > 0 and eff_y > 20.0:
                     if 0 < y_pct <= 15.0:
                         dps = round((val / qty) * (y_pct / 100.0), 2)
                         df.at[idx, '1株配当(円)'] = dps
                         ann_pre = round(qty * dps)
                         eff_y = (ann_pre / val * 100.0)
-                        method_str = f"① 株数×1株配当 ({qty:,.0f}株×{dps:,.2f}円)"
+                        method_str = f"① {qty:,.0f}株 × {dps:,.2f}円 ({b_type})"
                     else:
                         ann_pre = 0.0
                         eff_y = 0.0
                         df.at[idx, '1株配当(円)'] = 0.0
                         method_str = "異常値除外 (0円)"
                 else:
-                    method_str = f"① 株数×1株配当 ({qty:,.0f}株×{dps:,.2f}円)"
+                    method_str = f"① {qty:,.0f}株 × {dps:,.2f}円 ({b_type})"
             else:
                 ann_pre = 0.0
-                method_str = "無配 / 0円"
                 eff_y = 0.0
+                method_str = "無配 / 0円"
 
         pre_tax_list.append(float(ann_pre))
         calc_method_list.append(method_str)
@@ -663,7 +843,7 @@ def calc_exact_annual_dividend(df):
     return df
 
 # ==============================================================================
-# 3. 証券会社CSVの自動判別 & マルチブロック高精度解析エンジン
+# 4. 証券会社CSVの自動判別 & マルチブロック高精度解析エンジン
 # ==============================================================================
 
 def is_csv_header_line(line):
@@ -702,6 +882,8 @@ def detect_and_parse_csv(uploaded_file):
             df_saved = pd.read_csv(io.StringIO(text_data))
             if '配当ソース' not in df_saved.columns:
                 df_saved['配当ソース'] = '手動/保存'
+            if '採用基準' not in df_saved.columns:
+                df_saved['採用基準'] = '手動/保存'
             if '保有数量' not in df_saved.columns:
                 df_saved['保有数量'] = 0.0
             if '1株配当(円)' not in df_saved.columns:
@@ -732,7 +914,6 @@ def detect_and_parse_csv(uploaded_file):
             i += 1
             continue
 
-        # セクション見出し行から口座区分と「投資信託セクションかどうか」を検出
         if line.count(',') <= 3 and not is_csv_header_line(line):
             acc_detect = normalize_account(line)
             if acc_detect:
@@ -768,11 +949,11 @@ def detect_and_parse_csv(uploaded_file):
                 if not col_name:
                     col_name = next((c for c in df_block.columns if any(k in str(c) for k in ['銘柄', 'ファンド', '商品'])), None)
 
-                # ヘッダー列名が「ファンド名」なら投資信託ブロック
                 header_is_trust = current_section_is_trust or (col_name is not None and 'ファンド名' in str(col_name) and '銘柄' not in str(col_name))
 
-                col_qty = next((c for c in df_block.columns if any(k in str(c) for k in ['保有数量', '保有株数', '保有口数', '数量', '株数', '口数']) and '注文' not in str(c)), None)
+                col_qty = next((c for c in df_block.columns if any(k in str(c) for k in ['保有数量', '保有株数', '保有口数', '数量', '株数', '口数', '残高']) and '注文' not in str(c)), None)
                 col_unit = next((c for c in df_block.columns if str(c).strip() in ['単位', '数量単位']), None)
+                col_price = next((c for c in df_block.columns if any(k in str(c) for k in ['現在値', '基準価額']) and '外貨' not in str(c) and 'US' not in str(c)), None)
                 col_val = next((c for c in df_block.columns if any(k in str(c) for k in ['時価評価額[円]', '評価額[円]', '評価金額[円]', '時価評価額', '評価金額', '評価額']) and '外貨' not in str(c) and 'US' not in str(c) and '損益' not in str(c)), None)
                 col_pnl = next((c for c in df_block.columns if any(k in str(c) for k in ['評価損益[円]', '評価損益額', '評価損益', 'トータルリターン[円]', 'トータルリターン', '含み損益', '損益']) and '外貨' not in str(c) and 'US' not in str(c) and '率' not in str(c) and '％' not in str(c) and '%' not in str(c)), None)
                 col_cost = next((c for c in df_block.columns if any(k in str(c) for k in ['取得総額[円]', '取得総額', '取得金額', '買付金額']) and '外貨' not in str(c)), None)
@@ -800,6 +981,10 @@ def detect_and_parse_csv(uploaded_file):
                         is_tr = is_investment_trust_row(name_str, code_str, raw_qty_str, type_str, val_num, qty_num)
                         ext_code = extract_ticker_from_text(name_str, code_str, is_trust=is_tr)
                         a_cls = classify_asset_type(name_str, ext_code, is_trust=is_tr)
+
+                        # もし個別株・ETFで数量列が空でも現在値があれば株数を復元
+                        if a_cls != '投資信託' and qty_num <= 0 and col_price and clean_num(row[col_price]) > 0:
+                            qty_num = float(round(val_num / clean_num(row[col_price])))
 
                         has_pnl = (col_pnl is not None) and (str(row[col_pnl]).strip() not in ['', '-', '--', '---', 'nan', 'None'])
                         pnl_num = clean_num(row[col_pnl]) if has_pnl else 0.0
@@ -835,6 +1020,7 @@ def detect_and_parse_csv(uploaded_file):
                             '評価損益': val_num - cost_num,
                             '1株配当(円)': 0.0,
                             '配当利回り(%)': 0.0,
+                            '採用基準': '',
                             '配当入金月': '',
                             '配当ソース': ''
                         })
@@ -846,7 +1032,7 @@ def detect_and_parse_csv(uploaded_file):
     return pd.DataFrame(records)
 
 # ==============================================================================
-# 4. サイドバー：一括ドラッグ＆ドロップ & 最新データ取得
+# 5. サイドバー：一括ドラッグ＆ドロップ & 最新データ取得
 # ==============================================================================
 
 current_usdjpy = fetch_usdjpy_rate()
@@ -864,8 +1050,9 @@ with st.sidebar:
     st.header("🌐 2. リアルタイム市場データ")
     st.metric("現在のドル円レート", f"{current_usdjpy:.1f} 円/$")
     st.caption("""
-    **【配当計算ルール】**
-    ・算出方法：**① 保有株数 × 1株配当(円)** に完全統一
+    **【配当・分配金 算出ルール】**
+    ・優先順位：**①今期予想額** ➔ なければ（0円なら）**②直近実績額** を自動採用（投信の分配金も同様）
+    ・算出方法：**① 保有株数(または万口数) × 1株(1万口)配当**
     ・税金表示：**税引前**と**税引後（米国現地税10%＋国内税20.315%控除）**の2パターンを常時併記
     """)
     if st.button("🔄 最新配当＆為替データを再取得", use_container_width=True):
@@ -877,7 +1064,7 @@ with st.sidebar:
     st.markdown("---")
     use_demo = st.checkbox("🧪 デモデータで試す（CSVなしで確認）", value=False)
 
-# --- データの読み込みと最新1株配当(DPS)の自動付与 ---
+# --- データの読み込みと最新1株配当(DPS)・投信分配金の自動付与 ---
 file_sig = "|".join(sorted([f"{f.name}_{f.size}" for f in uploaded_files])) if uploaded_files else ("DEMO" if use_demo else "EMPTY")
 
 if st.session_state.get("last_file_sig") != file_sig:
@@ -892,13 +1079,14 @@ if st.session_state.get("last_file_sig") != file_sig:
 
     elif use_demo:
         demo_data = [
-            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND_NO_DIV', '銘柄名': 'eMAXIS Slim 全世界株式(オール・カントリー)', '保有数量': 1800000, '評価額': 4500000, '取得額': 3200000, '評価損益': 1300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '配当入金月': '-', '配当ソース': ''},
-            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '米国株・米国ETF', '銘柄コード': 'VYM', '銘柄名': 'バンガード・米国高配当株式ETF (VYM)', '保有数量': 150, '評価額': 2800000, '取得額': 2100000, '評価損益': 700000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '配当入金月': '', '配当ソース': ''},
-            {'証券会社': 'SBI証券', '口座区分': '特定', '資産クラス': '日本株・東証ETF', '銘柄コード': '8058', '銘柄名': '三菱商事 (8058)', '保有数量': 600, '評価額': 1800000, '取得額': 1200000, '評価損益': 600000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '配当入金月': '', '配当ソース': ''},
-            {'証券会社': 'SBI証券', '口座区分': '特定', '資産クラス': '日本株・東証ETF', '銘柄コード': '8316', '銘柄名': '三井住友フィナンシャルG (8316)', '保有数量': 400, '評価額': 1500000, '取得額': 950000, '評価損益': 550000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '配当入金月': '', '配当ソース': ''},
-            {'証券会社': '楽天証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND_NO_DIV', '銘柄名': '楽天・全米株式インデックス・ファンド', '保有数量': 1200000, '評価額': 3200000, '取得額': 2400000, '評価損益': 800000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '配当入金月': '-', '配当ソース': ''},
-            {'証券会社': '楽天証券', '口座区分': '特定', '資産クラス': '米国株・米国ETF', '銘柄コード': 'SPYD', '銘柄名': 'SPDR ポートフォリオS&P 500高配当株式ETF (SPYD)', '保有数量': 340, '評価額': 2200000, '取得額': 1900000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '配当入金月': '', '配当ソース': ''},
-            {'証券会社': '楽天証券', '口座区分': '一般', '資産クラス': '日本株・東証ETF', '銘柄コード': '2914', '銘柄名': '日本たばこ産業 (2914)', '保有数量': 300, '評価額': 1200000, '取得額': 900000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '配当入金月': '', '配当ソース': ''},
+            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND', '銘柄名': 'eMAXIS Slim 全世界株式(オール・カントリー)', '保有数量': 1800000, '評価額': 4500000, '取得額': 3200000, '評価損益': 1300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
+            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND', '銘柄名': 'SBI日本高配当株式（分配）ファンド（年4回決算型）', '保有数量': 1500000, '評価額': 1800000, '取得額': 1500000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
+            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '米国株・米国ETF', '銘柄コード': 'VYM', '銘柄名': 'バンガード・米国高配当株式ETF (VYM)', '保有数量': 150, '評価額': 2800000, '取得額': 2100000, '評価損益': 700000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
+            {'証券会社': 'SBI証券', '口座区分': '特定', '資産クラス': '日本株・東証ETF', '銘柄コード': '8058', '銘柄名': '三菱商事 (8058)', '保有数量': 600, '評価額': 1800000, '取得額': 1200000, '評価損益': 600000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
+            {'証券会社': 'SBI証券', '口座区分': '特定', '資産クラス': '日本株・東証ETF', '銘柄コード': '8316', '銘柄名': '三井住友フィナンシャルG (8316)', '保有数量': 400, '評価額': 1500000, '取得額': 950000, '評価損益': 550000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
+            {'証券会社': '楽天証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND', '銘柄名': '楽天・全米株式インデックス・ファンド', '保有数量': 1200000, '評価額': 3200000, '取得額': 2400000, '評価損益': 800000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
+            {'証券会社': '楽天証券', '口座区分': '特定', '資産クラス': '米国株・米国ETF', '銘柄コード': 'SPYD', '銘柄名': 'SPDR ポートフォリオS&P 500高配当株式ETF (SPYD)', '保有数量': 340, '評価額': 2200000, '取得額': 1900000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
+            {'証券会社': '楽天証券', '口座区分': '一般', '資産クラス': '日本株・東証ETF', '銘柄コード': '2914', '銘柄名': '日本たばこ産業 (2914)', '保有数量': 300, '評価額': 1200000, '取得額': 900000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
         ]
         df_list.append(pd.DataFrame(demo_data))
 
@@ -911,12 +1099,12 @@ if st.session_state.get("last_file_sig") != file_sig:
         if '口座区分' not in raw_master.columns:
             raw_master['口座区分'] = '特定'
 
-        with st.spinner("🔍 各銘柄の「1株あたり年間配当金(DPS)」と「入金月」を厳密調査中..."):
+        with st.spinner("🔍 各銘柄・投信の「今期予想配当（未定なら直近実績）」と「入金月」を厳密調査中..."):
             enriched_master = enrich_with_latest_dividends(raw_master, current_usdjpy)
         st.session_state["portfolio_df"] = enriched_master
     else:
         st.session_state["portfolio_df"] = pd.DataFrame(
-            columns=['証券会社', '口座区分', '資産クラス', '為替影響', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '評価損益', '1株配当(円)', '配当利回り(%)', '配当入金月', '配当ソース']
+            columns=['証券会社', '口座区分', '資産クラス', '為替影響', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '評価損益', '1株配当(円)', '配当利回り(%)', '採用基準', '配当入金月', '配当ソース']
         )
     st.session_state["last_file_sig"] = file_sig
 
@@ -955,12 +1143,12 @@ with tab1:
         c2.metric("投資元本（取得額合計）", f"{current_total_cost / 10000:,.0f} 万円", f"{current_total_cost:,.0f} 円")
         c3.metric("トータル含み損益", f"{total_pnl / 10000:+,.0f} 万円", f"{pnl_ratio:+.2f} % ({total_pnl:+,.0f} 円)")
         c4.metric(
-            "年間配当金（税引前）",
+            "年間配当・分配金（税引前）",
             fmt_man_or_sen(current_annual_div_pre),
             f"実額 {current_annual_div_pre:,.0f} 円 (利回り {total_yield_pre:.2f}%)"
         )
         c5.metric(
-            "年間配当金（税引後・米国税控除済）",
+            "年間配当・分配金（税引後・米国税控除済）",
             fmt_man_or_sen(current_annual_div_post),
             f"実額 {current_annual_div_post:,.0f} 円 (利回り {total_yield_post:.2f}%)"
         )
@@ -1019,11 +1207,12 @@ with tab1:
             )
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        st.subheader("📋 全保有銘柄一覧（方式①：保有株数 × 1株配当 ＆ 税引前/税引後 併記）")
+        st.subheader("📋 全保有銘柄一覧（今期予想 ➔ 直近実績 ＆ 税引前/税引後 併記）")
+        st.caption("※「1株配当(円)」列には、株式・ETFは『1株あたり年間配当金』、投資信託は『1万口あたり年間分配金』を表示しています。")
         disp_cols_t1 = [
             '証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名',
             '保有数量', '評価額', '取得額', '評価損益',
-            '1株配当(円)', '年間配当金(税引前)', '年間配当金(税引後)',
+            '1株配当(円)', '採用基準', '年間配当金(税引前)', '年間配当金(税引後)',
             '実質配当利回り(税引前%)', '実質配当利回り(税引後%)', '計算式', '税区分'
         ]
         st.dataframe(
@@ -1043,10 +1232,10 @@ with tab1:
         )
 
 # ==============================================================================
-# TAB 2: 配当データ分析（税引前・税引後の2パターン常時表示）& 入金月カレンダー
+# TAB 2: 配当データ分析（税引前・税引後併記）& 入金月カレンダー & 増配シミュレーター
 # ==============================================================================
 with tab2:
-    st.subheader("🎁 条件別 配当データ分析（①保有株数×1株配当 / 税引前・税引後併記）＋ 入金月カレンダー")
+    st.subheader("🎁 条件別 配当・分配金データ分析（今期予想優先 ➔ 直近実績 / 税引前・税引後併記）")
 
     if df_master.empty:
         st.warning("分析するデータがありません。サイドバーからCSVをドロップするか、デモデータを有効にしてください。")
@@ -1076,20 +1265,24 @@ with tab2:
 
         basis_col = '評価額' if '現時点評価額' in asset_basis else '取得額'
 
-        # --- 検算・手動微調整エディタ（保有株数・1株配当(円)を直接確認・修正可能） ---
-        with st.expander("🛠️ 【1株配当の検算・微調整パネル】保有株数・1株配当(円)・入金月を確認・修正する（クリックで開閉）", expanded=False):
-            st.caption("※すべての個別株・ETFは **`保有数量(株) × 1株配当(円)`** で計算されています。企業の特別配当などでお手元の数値と微差がある場合は、`1株配当(円換算) ✏️` を書き換えると即座に反映されます。")
-            edit_cols = ['証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '1株配当(円)', '配当入金月', '配当ソース']
+        # --- 検算・手動微調整エディタ（保有株数・1株/1万口配当(円)を直接確認・修正可能） ---
+        with st.expander("🛠️ 【1株配当・投信分配金の検算・微調整パネル】保有数量・配当単価(円)・入金月を確認・修正する（クリックで開閉）", expanded=True):
+            st.info("""
+            💡 **配当・分配金の自動採用ルールと1円単位の検算について**：
+            * **今期予想 ➔ 直近実績の自動切替**：今期会社予想が出ている銘柄は**「今期予想」**を採用し、今期予想が未定・非開示（0円）の銘柄やETF・米国株・分配型投信は**「直近実績」**を自動採用しています（『採用基準』列に表示）。
+            * **手動での微調整**：もしお手元の管理シートと1株配当（投信は1万口あたり分配金）が異なる場合は、下の表の **`1株配当(円) ✏️`** をダブルクリックして書き換えるだけで、アプリ全体の合計金額が即座に1円単位で一致します。
+            """)
+            edit_cols = ['証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '1株配当(円)', '採用基準', '配当入金月', '配当ソース']
             edited_df = st.data_editor(
                 st.session_state["portfolio_df"][edit_cols],
                 column_config={
                     "保有数量": st.column_config.NumberColumn("保有数量(株/口) ✏️", min_value=0.0, step=1.0, format="%d"),
-                    "1株配当(円)": st.column_config.NumberColumn("1株配当(円換算) ✏️", help="1株あたりの年間配当金(円)。『保有数量×1株配当』で計算されます", min_value=0.0, step=1.0, format="%.2f 円"),
+                    "1株配当(円)": st.column_config.NumberColumn("1株/1万口配当(円) ✏️", help="株・ETFは1株あたり年間配当(円)、投資信託は1万口あたり年間分配金(円)", min_value=0.0, step=1.0, format="%.2f 円"),
                     "配当入金月": st.column_config.TextColumn("配当入金月 ✏️", help="カンマ区切りで入金月を入力（例: 6,12 や 3,6,9,12 や 毎月）"),
                     "評価額": st.column_config.NumberColumn("現時点評価額(円)", format="¥%d"),
                     "取得額": st.column_config.NumberColumn("取得額(円)", format="¥%d"),
                 },
-                disabled=['証券会社', '口座区分', '資産クラス', '銘柄名', '配当ソース'],
+                disabled=['証券会社', '口座区分', '資産クラス', '銘柄名', '採用基準', '配当ソース'],
                 use_container_width=True,
                 hide_index=True,
                 key="dividend_editor"
@@ -1103,11 +1296,12 @@ with tab2:
                 for c_up in ['保有数量', '1株配当(円)', '配当入金月', '銘柄コード']:
                     st.session_state["portfolio_df"][c_up] = edited_df[c_up]
                 st.session_state["portfolio_df"]['配当ソース'] = "手動/保存"
+                st.session_state["portfolio_df"]['採用基準'] = "手動設定"
                 st.rerun()
 
             csv_save = st.session_state["portfolio_df"].to_csv(index=False).encode('utf-8-sig')
             st.download_button(
-                label="💾 現在のポートフォリオ＆1株配当データをCSVで保存（次回からそのままドロップ可能）",
+                label="💾 現在のポートフォリオ＆配当データをCSVで保存（次回からそのままドロップ可能）",
                 data=csv_save,
                 file_name="my_portfolio_with_dividend.csv",
                 mime="text/csv"
@@ -1167,7 +1361,7 @@ with tab2:
 
             # --- 月別 配当金入金カレンダー（税引前 / 税引後 切り替え可能 ＆ 万円/千円表示） ---
             st.markdown("---")
-            st.markdown("#### 🗓️ 月別 配当金入金カレンダー（1月〜12月）")
+            st.markdown("#### 🗓️ 月別 配当・分配金入金カレンダー（1月〜12月）")
             c_opt1, c_opt2 = st.columns(2)
             with c_opt1:
                 cal_tax_basis = st.radio("カレンダーの税金表示", ["税引後（米国税10%＋国内税控除後の手取り）", "税引前（額面）"], index=0, horizontal=True)
@@ -1232,7 +1426,7 @@ with tab2:
                     df_cal,
                     x='月', y=y_col_cal, color='銘柄名',
                     category_orders={'月': month_order},
-                    title=f"1月〜12月 月別の配当金 受取スケジュール（{tax_short_label} / 単位：{y_suffix}）"
+                    title=f"1月〜12月 月別の配当・分配金 受取スケジュール（{tax_short_label} / 単位：{y_suffix}）"
                 )
                 fig_cal.update_traces(texttemplate=txt_tmpl, textposition='inside')
                 fig_cal.update_layout(
@@ -1248,6 +1442,55 @@ with tab2:
                     month_cols = [f"{m}月" for m in range(1, 13)] + ['年間合計']
                     fmt_dict = {mc: '{:,.0f} 円' for mc in month_cols}
                     st.dataframe(df_cal_mat.style.format(fmt_dict), use_container_width=True, hide_index=True)
+
+            # --- 配当再投資（DRIP）＆ 増配（YOC成長）シミュレーター（完全復元） ---
+            st.markdown("---")
+            with st.container(border=True):
+                st.markdown("#### 🔄 配当再投資 ＆ 増配（YOC成長）シミュレーター（向こう1〜20年）")
+                st.caption("高配当株投資の最大の武器である「企業の増配（毎年配当が増える力）」と「受取配当金の再投資」によって、現在の配当金が将来いくらに育つかを試算します。")
+                dc1, dc2, dc3 = st.columns(3)
+                with dc1:
+                    div_growth_rate = st.number_input("想定 年間増配率（%）", min_value=0.0, max_value=20.0, value=4.0, step=0.5, help="連続増配株やVYM等の過去平均増配率は年3%〜6%程度です")
+                with dc2:
+                    reinvest_flag = st.radio("受取配当金の再投資", ["毎年全額を再投資する（複利加速）", "再投資しない（配当を生活費に使う）"], index=0)
+                with dc3:
+                    add_yearly_high_div = st.number_input("高配当株への年間追加投資額（万円/年）", min_value=0, max_value=1000, value=0, step=10)
+
+                if sum_div_post > 0 and sum_target_asset > 0:
+                    cur_y_post = portfolio_yield_post / 100.0
+                    g_rate = div_growth_rate / 100.0
+                    do_reinv = ("全額を再投資" in reinvest_flag)
+
+                    drip_rows = []
+                    sim_div_yen = sum_div_post
+                    sim_cost_yen = float(df_filtered['取得額'].sum())
+                    for y_i in range(1, 21):
+                        sim_div_yen = sim_div_yen * (1.0 + g_rate)
+                        if do_reinv:
+                            sim_div_yen += sim_div_yen * cur_y_post
+                        if add_yearly_high_div > 0:
+                            add_yen = add_yearly_high_div * 10000.0
+                            sim_cost_yen += add_yen
+                            sim_div_yen += add_yen * cur_y_post
+
+                        yoc_future = (sim_div_yen / sim_cost_yen * 100.0) if sim_cost_yen > 0 else 0.0
+                        drip_rows.append({
+                            '経過年': f"{y_i}年後({datetime.now().year + y_i}年)",
+                            '年間手取り配当金(万円)': round(sim_div_yen / 10000.0, 1),
+                            '年間手取り配当金(円)': int(round(sim_div_yen)),
+                            '将来YOC(元本利回り)': f"{yoc_future:.2f} %"
+                        })
+                    df_drip = pd.DataFrame(drip_rows)
+                    fig_drip = px.bar(
+                        df_drip, x='経過年', y='年間手取り配当金(万円)',
+                        title="増配＆再投資による 将来の年間手取り配当金 推移（単位：万円）"
+                    )
+                    fig_drip.update_traces(texttemplate='%{y:,.1f}万円', textposition='outside', marker_color='#f59e0b')
+                    fig_drip.update_layout(
+                        yaxis_title="年間手取り配当金（万円）",
+                        yaxis=dict(tickformat=",.1f", ticksuffix="万円")
+                    )
+                    st.plotly_chart(fig_drip, use_container_width=True)
 
             st.markdown("---")
             g_col1, g_col2 = st.columns(2)
@@ -1284,10 +1527,10 @@ with tab2:
                 )
                 st.plotly_chart(fig_acc_div, use_container_width=True)
 
-            st.markdown("##### 📋 条件抽出銘柄の配当詳細・検算リスト（①保有株数×1株配当 / 税引前・税引後併記）")
+            st.markdown("##### 📋 条件抽出銘柄の配当詳細・検算リスト（今期予想優先 ➔ 直近実績 / 税引前・税引後併記）")
             display_cols = [
                 '証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名',
-                '保有数量', '基準資産額', '1株配当(円)',
+                '保有数量', '基準資産額', '1株配当(円)', '採用基準',
                 '年間配当金(税引前)', '年間配当金(税引後)',
                 '基準対比利回り(税引前%)', '基準対比利回り(税引後%)',
                 '計算式', '税区分', '配当入金月', '配当ソース'
