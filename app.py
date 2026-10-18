@@ -10,8 +10,11 @@ import unicodedata
 import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dateutil.relativedelta import relativedelta
+
+# 日本時間 (JST) タイムゾーン定義
+JST = timezone(timedelta(hours=9))
 
 # --- ページ設定 ---
 st.set_page_config(page_title="資産管理 & サイドFIRE統合シミュレーター", layout="wide")
@@ -39,6 +42,12 @@ st.markdown("""
 [data-testid="stMetricLabel"] {
     font-size: 0.9rem !important;
     line-height: 1.3 !important;
+}
+.mkt-time-caption {
+    font-size: 0.75rem;
+    color: #64748b;
+    margin-top: -10px;
+    margin-bottom: 10px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -119,7 +128,7 @@ def clean_num(val):
 def fmt_man(man_val, signed=False):
     """
     「万円」単位の数値をフォーマットする関数
-    - 5桁万円以上（10,000万円＝1億円以上）の場合：『〇億〇万円』表記にする（例：12,883万円 ➔ 1億2,883万円）
+    - 5桁万円以上（10,000万円＝1億円以上）の場合：『〇億〇万円』表記にする
     - 4桁万円以下の場合：『〇万円』（整数）表記にする
     """
     if pd.isna(man_val):
@@ -301,11 +310,11 @@ def extract_ticker_from_text(name_str, code_str="", is_trust=False):
     return ""
 
 # ==============================================================================
-# 3. リアルタイム市場データ取得エンジン（ドル円・日経平均・S&P500・ナスダック 現物＆先物）
+# 3. リアルタイム市場データ取得エンジン（価額の日時［日本時間］付き）
 # ==============================================================================
 
 def _fetch_single_quote(symbol):
-    """Yahoo Finance APIから指定シンボルの最新値と前日比(%)を取得する"""
+    """Yahoo Finance APIから指定シンボルの最新値・前日比(%)・価額日時(JST)を取得する"""
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(symbol)}?range=5d&interval=1d"
@@ -317,25 +326,37 @@ def _fetch_single_quote(symbol):
             meta = result[0].get('meta', {})
             price = float(meta.get('regularMarketPrice', 0.0))
             prev = float(meta.get('chartPreviousClose') or meta.get('previousClose') or 0.0)
-            # メタに前日終値がない場合はヒストリカル終値から取得
+            mkt_time = meta.get('regularMarketTime')
+
             closes = result[0].get('indicators', {}).get('quote', [{}])[0].get('close', [])
-            valid_closes = [float(c) for c in closes if c is not None and float(c) > 0]
-            if price <= 0 and valid_closes:
-                price = valid_closes[-1]
-            if prev <= 0 and len(valid_closes) >= 2:
-                prev = valid_closes[-2]
+            timestamps = result[0].get('timestamp', [])
+            valid_pairs = [(float(c), int(t)) for c, t in zip(closes, timestamps) if c is not None and float(c) > 0]
+
+            if price <= 0 and valid_pairs:
+                price, last_ts = valid_pairs[-1]
+                if not mkt_time:
+                    mkt_time = last_ts
+            if prev <= 0 and len(valid_pairs) >= 2:
+                prev = valid_pairs[-2][0]
+
+            if mkt_time:
+                dt_jst = datetime.fromtimestamp(int(mkt_time), tz=JST)
+                time_str = dt_jst.strftime('%Y/%m/%d %H:%M')
+            else:
+                time_str = datetime.now(JST).strftime('%Y/%m/%d %H:%M')
+
             if price > 0:
                 diff = (price - prev) if prev > 0 else 0.0
                 pct = (diff / prev * 100.0) if prev > 0 else 0.0
-                return price, diff, pct
+                return price, diff, pct, time_str
     except Exception:
         pass
-    return None, 0.0, 0.0
+    return None, 0.0, 0.0, ""
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_realtime_market_indices():
     """
-    ドル円・日経平均・S&P500・ナスダックの「現物」および「先物」を並列でリアルタイム取得する
+    ドル円・日経平均・S&P500・ナスダックの「現物」および「先物」と、その価額日時を並列取得する
     """
     targets = {
         'usdjpy': ['JPY=X'],
@@ -350,17 +371,20 @@ def fetch_realtime_market_indices():
     def _get_item(key_syms):
         key, syms = key_syms
         for sym in syms:
-            p, d, pct = _fetch_single_quote(sym)
+            p, d, pct, t_str = _fetch_single_quote(sym)
             if p is not None and p > 0:
-                return key, {'price': p, 'diff': d, 'pct': pct, 'symbol': sym}
-        return key, {'price': None, 'diff': 0.0, 'pct': 0.0, 'symbol': syms[0]}
+                return key, {'price': p, 'diff': d, 'pct': pct, 'time': t_str, 'symbol': sym}
+        return key, {'price': None, 'diff': 0.0, 'pct': 0.0, 'time': '', 'symbol': syms[0]}
 
     with ThreadPoolExecutor(max_workers=7) as ex:
         res_list = list(ex.map(_get_item, targets.items()))
 
     market_dict = dict(res_list)
     if not market_dict['usdjpy']['price']:
-        market_dict['usdjpy'] = {'price': 150.0, 'diff': 0.0, 'pct': 0.0, 'symbol': 'JPY=X'}
+        market_dict['usdjpy'] = {
+            'price': 150.0, 'diff': 0.0, 'pct': 0.0,
+            'time': datetime.now(JST).strftime('%Y/%m/%d %H:%M'), 'symbol': 'JPY=X'
+        }
     return market_dict
 
 def default_pay_months(ticker):
@@ -434,8 +458,6 @@ def search_jp_ticker_by_name(stock_name):
 def fetch_trust_distribution_data(fund_name, expected_nav=10000.0):
     """
     投資信託（ファンド）の分配金を調査する関数
-    - 無分配・再投資型インデックス投信（オルカン・S&P500等）は0円と高速判定
-    - 分配型投信はYahoo!ファイナンスの投信ページ等から「今期予想分配金」または「直近1年の実績分配金（1万口あたり）」を取得
     """
     s = unicodedata.normalize('NFKC', str(fund_name)).strip()
 
@@ -520,10 +542,8 @@ def fetch_trust_distribution_data(fund_name, expected_nav=10000.0):
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit_price_yen=0.0, is_trust=False):
     """
-    【核心ルール】
     - 今期予想が出ていれば（＞0円なら）「今期予想額」を最優先で採用
-    - 今期予想がなければ（0円・未定・ETF・米国株など）「直近実績額（前期実績または直近1年実績合計）」を採用
-    - 投資信託の分配金も同様に調査
+    - 今期予想がなければ（0円・未定・ETF・米国株など）「直近実績額」を採用
     """
     if is_trust or str(ticker).startswith("FUND"):
         d_val, y_val, b_type, src_lbl, pm = fetch_trust_distribution_data(stock_name, expected_unit_price_yen)
@@ -550,7 +570,6 @@ def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit
     detected_price_yen = None
     pay_months_str = default_pay_months(t_upper)
 
-    # A. 日本株・東証ETF: Yahoo!ファイナンス日本版 & 株探 (Kabutan)
     if is_jp:
         try:
             url_jp = f"https://finance.yahoo.co.jp/quote/{t_upper}.T"
@@ -624,7 +643,6 @@ def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit
         except Exception:
             pass
 
-    # B. Yahoo Finance Chart API (直近1年間の実績配当合計・米国株・東証ETF・入金月)
     try:
         url_api = f"https://query1.finance.yahoo.com/v8/finance/chart/{urllib.parse.quote(yf_symbol)}?range=1y&interval=1d&events=div,split"
         req = urllib.request.Request(url_api, headers=headers)
@@ -703,7 +721,6 @@ def fetch_exact_dividend_data(ticker, stock_name="", usdjpy=150.0, expected_unit
 
     ref_price_yen = detected_price_yen or expected_unit_price_yen
 
-    # C. 【優先順位の適用】① 今期予想 (＞0円) ➔ ② 直近実績 (＞0円) ➔ ③ バックアップ辞書
     if forecast_dps_yen is not None and forecast_dps_yen > 0:
         if not (ref_price_yen and ref_price_yen > 0 and (forecast_dps_yen / ref_price_yen * 100.0) > 18.0):
             y_out = forecast_yield if (forecast_yield and forecast_yield > 0) else (
@@ -809,7 +826,6 @@ def enrich_with_latest_dividends(df, usdjpy=150.0):
 
 def calc_exact_annual_dividend(df):
     """
-    【方式①完全統一】
     - 個別株・ETF：『保有株数 × 1株あたり年間配当金(円)』
     - 投資信託：『(保有口数 ÷ 10,000) × 1万口あたり年間分配金(円)』
     - 税金は「税引前（額面100%）」と「税引後（米国税10%＋国内税20.315%控除）」の2パターンを常時算出
@@ -1074,21 +1090,26 @@ def detect_and_parse_csv(uploaded_file):
     return pd.DataFrame(records)
 
 # ==============================================================================
-# 6. サイドバー：一括ドラッグ＆ドロップ & リアルタイム市場データ（日経・S&P500・ナスダック 現物＆先物）
+# 6. サイドバー：一括ドラッグ＆ドロップ & リアルタイム市場データ（価額の日時明記）
 # ==============================================================================
 
 market_data = fetch_realtime_market_indices()
 current_usdjpy = float(market_data['usdjpy']['price'] or 150.0)
 
-def _fmt_idx_val(m_item, unit="", decimals=0):
+def _render_sidebar_metric(container, label, m_item, unit="", decimals=0):
+    """サイドバーに指標メトリックと価額の日時（日本時間）をセットで表示する"""
     p = m_item.get('price')
+    t_str = m_item.get('time', '')
     if p is None or p <= 0:
-        return "取得中...", None
+        container.metric(label, "取得中...", None)
+        return
     fmt_p = f"{p:,.{decimals}f}{unit}"
     pct = m_item.get('pct', 0.0)
     diff = m_item.get('diff', 0.0)
     delta_str = f"{diff:+,.{decimals}f} ({pct:+.2f}%)"
-    return fmt_p, delta_str
+    container.metric(label, fmt_p, delta_str)
+    if t_str:
+        container.markdown(f"<div class='mkt-time-caption'>🕒 {t_str} 時点</div>", unsafe_allow_html=True)
 
 with st.sidebar:
     st.header("📂 1. CSV一括ドラッグ＆ドロップ")
@@ -1102,39 +1123,23 @@ with st.sidebar:
     st.markdown("---")
     st.header("🌐 2. リアルタイム市場データ")
 
-    # ドル円
-    fx_v, fx_d = _fmt_idx_val(market_data['usdjpy'], " 円/$", 2)
-    st.metric("為替 ドル円 (USD/JPY)", fx_v, fx_d)
+    # 為替 ドル円
+    _render_sidebar_metric(st, "為替 ドル円 (USD/JPY)", market_data['usdjpy'], " 円/$", 2)
 
     # 日経平均（現物 ＆ 先物）
-    nk_s_v, nk_s_d = _fmt_idx_val(market_data['nikkei_spot'], " 円", 0)
-    nk_f_v, nk_f_d = _fmt_idx_val(market_data['nikkei_fut'], " 円", 0)
     s_c1, s_c2 = st.columns(2)
-    s_c1.metric("日経平均 (現物)", nk_s_v, nk_s_d)
-    s_c2.metric("日経平均 (先物)", nk_f_v, nk_f_d)
+    _render_sidebar_metric(s_c1, "日経平均 (現物)", market_data['nikkei_spot'], " 円", 0)
+    _render_sidebar_metric(s_c2, "日経平均 (先物)", market_data['nikkei_fut'], " 円", 0)
 
     # S&P 500（現物 ＆ 先物）
-    sp_s_v, sp_s_d = _fmt_idx_val(market_data['sp500_spot'], "", 1)
-    sp_f_v, sp_f_d = _fmt_idx_val(market_data['sp500_fut'], "", 1)
     s_c3, s_c4 = st.columns(2)
-    s_c3.metric("S&P500 (現物)", sp_s_v, sp_s_d)
-    s_c4.metric("S&P500 (先物)", sp_f_v, sp_f_d)
+    _render_sidebar_metric(s_c3, "S&P500 (現物)", market_data['sp500_spot'], "", 1)
+    _render_sidebar_metric(s_c4, "S&P500 (先物)", market_data['sp500_fut'], "", 1)
 
     # ナスダック（現物 ＆ 先物）
-    nq_s_v, nq_s_d = _fmt_idx_val(market_data['nasdaq_spot'], "", 1)
-    nq_f_v, nq_f_d = _fmt_idx_val(market_data['nasdaq_fut'], "", 1)
     s_c5, s_c6 = st.columns(2)
-    s_c5.metric("ナスダック (現物)", nq_s_v, nq_s_d)
-    s_c6.metric("ナスダック (先物)", nq_f_v, nq_f_d)
-
-    st.markdown("""
-    <div style="font-size:0.82rem; color:#555; background:#f8fafc; padding:8px 10px; border-radius:6px; border:1px solid #e2e8f0; margin-top:6px; margin-bottom:8px;">
-    <b>【配当・分配金 算出ルール】</b><br>
-    ・優先順位：<b>①今期予想額</b> ➔ なければ（0円なら）<b>②直近実績額</b> を自動採用（投信の分配金も同様）<br>
-    ・算出方法：<b>① 保有株数(万口数) × 1株(1万口)配当</b><br>
-    ・税金表示：<b>税引前</b>と<b>税引後（米国現地税10%＋国内税20.315%控除）</b>の2パターンを常時併記
-    </div>
-    """, unsafe_allow_html=True)
+    _render_sidebar_metric(s_c5, "ナスダック (現物)", market_data['nasdaq_spot'], "", 1)
+    _render_sidebar_metric(s_c6, "ナスダック (先物)", market_data['nasdaq_fut'], "", 1)
 
     if st.button("🔄 最新配当＆市場データを再取得", use_container_width=True):
         st.cache_data.clear()
@@ -1348,7 +1353,7 @@ with tab2:
 
         basis_col = '評価額' if '現時点評価額' in asset_basis else '取得額'
 
-        # --- 検算・手動微調整エディタ（保有株数・1株/1万口配当(円)を直接確認・修正可能） ---
+        # --- 検算・手動微調整エディタ ---
         with st.expander("🛠️ 【1株配当・投信分配金の検算・微調整パネル】保有数量・配当単価(円)・入金月を確認・修正する（クリックで開閉）", expanded=True):
             st.info("""
             💡 **配当・分配金の自動採用ルールと1円単位の検算について**：
@@ -1442,7 +1447,7 @@ with tab2:
                         st.progress(m_prog)
                         st.write(f"**{m_prog*100:.1f}%** (あと {max(m_target - monthly_div_post, 0):,.0f}円/月)")
 
-            # --- 月別 配当金入金カレンダー（税引前 / 税引後 切り替え可能 ＆ 万円/千円表示） ---
+            # --- 月別 配当金入金カレンダー ---
             st.markdown("---")
             st.markdown("#### 🗓️ 月別 配当・分配金入金カレンダー（1月〜12月）")
             c_opt1, c_opt2 = st.columns(2)
@@ -1812,7 +1817,7 @@ with tab4:
           * **推奨される設定値**：標準的なシミュレーションなら **【1.0% 〜 1.5%】**、将来の物価上昇リスクを厳しめに織り込むなら **【2.0%】** に設定するのがおすすめです。
         """)
 
-    # --- 5段階のFIREステージ別 到達ロードマップ診断（5桁万円は〇億〇万円表示） ---
+    # --- 5段階のFIREステージ別 到達ロードマップ診断 ---
     st.markdown("#### 🏔️ あなたの「5段階 FIREステージ」到達ロードマップ診断")
     st.caption("現在の資産・生活費・副業収入・手取り配当利回りから、5つの代表的なFIREステージの目標金額と到達予想時期を診断します。")
 
