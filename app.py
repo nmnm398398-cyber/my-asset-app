@@ -1,581 +1,760 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import io
-import csv
-import unicodedata
-import feedparser
-import urllib.parse
+import re
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 # --- ページ設定 ---
-st.set_page_config(
-    page_title="My Asset Manager", 
-    page_icon="📈", 
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.set_page_config(page_title="資産管理 & サイドFIRE統合シミュレーター", layout="wide")
+st.title("💎 資産管理 & サイドFIRE 統合シミュレーター")
 
-# --- ユーティリティ関数 ---
+# --- データクレンジング・解析関数 ---
 
-def normalize_text(text):
-    if not isinstance(text, str): return str(text)
-    return unicodedata.normalize('NFKC', text).upper()
-
-def clean_currency(x):
-    if isinstance(x, (int, float)): return float(x)
-    if isinstance(x, str):
-        # カンマ、円、USD、%などを除去
-        clean_str = x.replace(',', '').replace('円', '').replace('USD', '').replace('%', '').strip()
-        try:
-            return float(clean_str)
-        except ValueError:
-            return 0.0
-    return 0.0
-
-def detect_encoding(bytes_data):
-    encodings = ['cp932', 'shift_jis', 'utf-8', 'utf-16']
-    for enc in encodings:
-        try:
-            text = bytes_data.decode(enc)
-            if "銘柄" in text or "ファンド" in text or "評価" in text or "保有" in text:
-                return text
-        except:
-            continue
-    return bytes_data.decode('utf-8', errors='ignore')
-
-def universal_parser(text_data):
-    """万能CSVパーサー（銘柄コード対応版）"""
-    data_rows = []
-    lines = text_data.splitlines()
-    reader = csv.reader(lines)
-
-    col_maps = {
-        'code': ['銘柄コード', 'コード', '銘柄コード・ティッカー', 'ティッカー'],
-        'name': ['銘柄', '銘柄名', '銘柄名称', 'ファンド名', '銘柄コード/銘柄名', '銘柄・ファンド名'],
-        'value': ['評価額', '評価金額', '時価評価額', '時価評価額[円]', '金額'],
-        'profit': ['評価損益', '含み損益', '評価損益[円]', '損益'],
-        'account': ['口座', '口座区分', '預り区分', '詳細']
-    }
-
-    current_header_map = {}
-    current_section = "不明"
-
-    for row in reader:
-        if not row: continue
-        line_str = "".join(row)
-
-        if ("株式" in line_str or "投資信託" in line_str or "NISA" in line_str) and \
-           not any(k in line_str for k in ['銘柄', 'ファンド', '数量', '取得']):
-             current_section = line_str.replace('"', '').replace(',', '').replace('合計', '').strip()
-
-        is_header = False
-        temp_map = {}
-        for idx, col_val in enumerate(row):
-            col_val_clean = col_val.replace('"', '').strip()
-            temp_map[col_val_clean] = idx
-            if any(k in col_val_clean for k in col_maps['name']):
-                is_header = True
-        
-        if is_header:
-            current_header_map = temp_map
-            continue
-
-        if not current_header_map: continue
-
-        # 列インデックスの特定
-        code_idx = next((current_header_map[k] for k in col_maps['code'] if k in current_header_map), None)
-        name_idx = next((current_header_map[k] for k in col_maps['name'] if k in current_header_map), None)
-        val_idx = next((current_header_map[k] for k in col_maps['value'] if k in current_header_map), None)
-        pl_idx = next((current_header_map[k] for k in col_maps['profit'] if k in current_header_map), None)
-        acc_idx = next((current_header_map[k] for k in col_maps['account'] if k in current_header_map), None)
-
-        if name_idx is not None and val_idx is not None:
-            if len(row) > max(name_idx, val_idx):
-                try:
-                    name_val = row[name_idx].strip()
-                    val_float = clean_currency(row[val_idx])
-                    
-                    if not name_val or (val_float == 0 and row[val_idx].strip() == ""):
-                        continue
-                    
-                    acc_val = row[acc_idx] if acc_idx is not None and len(row) > acc_idx else current_section
-                    code_val = row[code_idx].strip() if code_idx is not None and len(row) > code_idx else ""
-                    
-                    # 銘柄コードのクリーニング（SBIのcsvなどで "=" がつく場合があるため）
-                    code_val = code_val.replace('=', '').replace('"', '')
-
-                    item = {
-                        'コード': code_val,
-                        '銘柄名': name_val,
-                        '評価額': val_float,
-                        '評価損益': clean_currency(row[pl_idx]) if pl_idx is not None and len(row) > pl_idx else 0,
-                        '口座区分_raw': acc_val,
-                        '種別_raw': '投資信託' if '投資信託' in current_section or 'ファンド' in name_val else '株式'
-                    }
-                    data_rows.append(item)
-                except:
-                    continue
-
-    df = pd.DataFrame(data_rows)
-    if not df.empty:
-        # 証券会社判定
-        if any(k in current_header_map for k in ['銘柄コード・ティッカー', '時価評価額[円]']):
-            df['証券会社'] = '楽天証券'
-        else:
-            df['証券会社'] = 'SBI証券'
-            
-    return df
-
-def guess_attributes(df):
-    """属性・利回り推測（精度向上版）"""
-    if df.empty: return df
-    
-    def get_country(row):
-        name = normalize_text(row['銘柄名'])
-        cat = normalize_text(row.get('種別_raw', ''))
-        if any(x in name for x in ["日本", "TOPIX", "日経", "JAPAN"]) or "国内" in cat: return "日本"
-        if any(x in name for x in ["米国", "S&P", "NASDAQ", "全米", "US", "AMERICA", "VYM", "SPYD"]): return "米国"
-        if any(x in name for x in ["インド", "INDIA"]): return "インド"
-        if any(x in name for x in ["全世界", "オール・カントリー", "オルカン", "GLOBAL"]): return "全世界"
-        if "先進国" in name: return "先進国"
-        if "新興国" in name: return "新興国"
-        return "その他"
-    
-    def get_class(row):
-        name = normalize_text(row['銘柄名'])
-        cat = normalize_text(row.get('種別_raw', ''))
-        if "投資信託" in cat or "ファンド" in name: return "投資信託"
-        if "S&P500" in name or "全米" in name or "オルカン" in name: return "投資信託"
-        return "個別株"
-
-    def get_account(row):
-        txt = normalize_text(row.get('口座区分_raw', ''))
-        if "旧NISA" in txt: return "旧NISA"
-        if "つみたて" in txt: return "新NISA(つみたて)"
-        if "成長" in txt: return "新NISA(成長)"
-        if "特定" in txt: return "特定口座"
-        if "一般" in txt: return "一般口座"
-        return "特定口座"
-
-    def get_yield(row):
-        """銘柄別の配当利回り推測（主要銘柄をハードコードして精度向上）"""
-        name = normalize_text(row['銘柄名'])
-        ac = get_class(row)
-        
-        # --- 主要銘柄の利回り辞書 (概算%) ---
-        # ※株式分割しても利回り（%）は大きく変わらないため、ここを適正値にしておけば配当額はズレない
-        yield_map = {
-            "日本たばこ": 4.5, "JT": 4.5,
-            "ソフトバンク": 4.0, "SOFTBANK": 4.0,
-            "日本製鉄": 3.8, "NIPPON STEEL": 3.8,
-            "三菱UFJ": 3.0, "三井住友": 3.0, "みずほ": 2.8,
-            "三菱商事": 2.6, "三井物産": 2.6, "伊藤忠": 2.4,
-            "NTT": 3.0, "日本電信電話": 3.0, "KDDI": 3.0,
-            "トヨタ": 2.5, "ホンダ": 3.0,
-            "武田": 4.0, "アステラス": 3.5,
-            "商船三井": 5.0, "日本郵船": 5.0, "川崎汽船": 4.5,
-            "INPEX": 3.5,
-            "イオン": 1.0, "AEON": 1.0
-        }
-        
-        # 辞書に一致するものがあればそれを返す
-        for key, val in yield_map.items():
-            if key in name:
-                return val
-
-        # --- 一般ルール ---
-        if any(x in name for x in ["高配当", "VYM", "HDV", "SPYD"]): return 3.5
-        if any(x in name for x in ["REIT", "リート"]): return 4.0
-        if any(x in name for x in ["債券", "AGG", "BND"]): return 2.5
-        if "インド" in name or "NASDAQ" in name: return 0.0
-        if any(x in name for x in ["S&P500", "SP500", "全米", "VTI"]): return 1.3
-        if any(x in name for x in ["全世界", "オルカン"]): return 1.5
-        if ac == "個別株": return 2.0 # デフォルト
+def clean_num(val):
+    """文字列から数値(float)へ安全に変換する"""
+    if pd.isna(val):
+        return 0.0
+    if isinstance(val, (int, float, np.number)):
+        return float(val)
+    s = str(val).replace(',', '').replace('円', '').replace('USD', '').replace('US$', '').replace('%', '').replace('+', '').replace(' ', '').replace(' ', '').strip()
+    if s in ['', '-', '--', '---', 'nan', 'None']:
+        return 0.0
+    # 全角数字・マイナス対応
+    s = s.translate(str.maketrans('０１２３４５６７８９－．', '0123456789-.'))
+    try:
+        return float(s)
+    except ValueError:
         return 0.0
 
-    def get_sector(row):
-        name = normalize_text(row['銘柄名'])
-        ac = get_class(row)
-        if ac == "投資信託":
-            if any(x in name for x in ["S&P500", "全米", "オルカン", "全世界", "TOPIX", "日経"]): return "インデックス投信"
-            if "インド" in name: return "インド株投信"
-            if "債券" in name: return "債券ファンド"
-            if "ゴールド" in name or "金" in name: return "コモディティ"
-            if "REIT" in name: return "REIT"
-            return "その他投信"
-        
-        if any(x in name for x in ["銀行", "フィナンシャル", "FG", "バンク"]): return "銀行・金融"
-        if any(x in name for x in ["商事", "物産", "伊藤忠", "丸紅", "双日"]): return "総合商社"
-        if any(x in name for x in ["通信", "ソフトバンク", "KDDI", "NTT"]): return "情報通信"
-        if any(x in name for x in ["自動車", "トヨタ", "ホンダ", "日産", "マツダ"]): return "自動車・輸送機"
-        if any(x in name for x in ["製薬", "薬品", "ファーマ"]): return "医薬品"
-        if any(x in name for x in ["鉄", "スチール"]): return "鉄鋼・素材"
-        if any(x in name for x in ["船", "郵船", "商船"]): return "海運"
-        if any(x in name for x in ["APPLE", "MICROSOFT", "NVIDIA", "AMAZON", "TESLA", "GOOGLE"]): return "米国ハイテク"
-        if any(x in name for x in ["P&G", "COCA", "J&J", "MCDONALD"]): return "米国ディフェンシブ"
-        return "その他事業"
+def normalize_account(text):
+    """口座区分を『NISA』『特定』『一般』の3つに名寄せする"""
+    s = str(text)
+    if any(k in s for k in ['NISA', 'nisa', 'ニーサ', '成長投資', 'つみたて']):
+        return 'NISA'
+    elif '特定' in s:
+        return '特定'
+    elif '一般' in s:
+        return '一般'
+    return None
+
+def parse_broker_csv(uploaded_file, broker_name):
+    """
+    楽天証券・SBI証券の複数ブロック構造CSVを解析し、
+    [証券会社, 口座区分, 銘柄名, 評価額, 取得額, 評価損益, 配当利回り] のDataFrameを返す
+    """
+    bytes_data = uploaded_file.getvalue()
+    text_data = ""
+    for enc in ['shift_jis', 'cp932', 'utf-8-sig', 'utf-8']:
+        try:
+            text_data = bytes_data.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if not text_data:
+        text_data = bytes_data.decode('utf-8', errors='ignore')
+
+    lines = text_data.splitlines()
+    records = []
+    current_account = '特定'  # デフォルト口座
     
-    def get_custom_category(row):
-        name = normalize_text(row['銘柄名'])
-        ac = get_class(row)
-        if ac == "個別株": return "個別株"
-        if any(x in name for x in ["ゴールド", "金", "GOLD"]): return "ゴールド"
-        if any(x in name for x in ["債券", "BND", "AGG"]): return "債券"
-        if any(x in name for x in ["S&P500", "全米", "オルカン", "全世界", "TOPIX", "日経", "NASDAQ", "先進国", "VTI", "VOO"]): return "インデックス投信"
-        return "その他投信"
+    # セクションごとにヘッダーとデータ行を解析
+    i = 0
+    n = len(lines)
+    header_keywords = ['銘柄', 'ファンド', '商品名', '評価額', '評価金額', '時価評価額', '保有数量', '数量']
 
-    def get_div_months(row):
-        country = get_country(row)
-        if country == "日本": return [3, 9]
-        if country == "米国": return [3, 6, 9, 12]
-        return [6, 12]
+    while i < n:
+        line = lines[i].strip()
+        if not line:
+            i += 1
+            continue
 
-    df['国・地域'] = df.apply(get_country, axis=1)
-    df['資産クラス'] = df.apply(get_class, axis=1)
-    df['口座区分'] = df.apply(get_account, axis=1)
-    df['予想利回り(%)'] = df.apply(get_yield, axis=1)
-    df['セクター'] = df.apply(get_sector, axis=1)
-    df['配当月'] = df.apply(get_div_months, axis=1)
-    df['詳細区分'] = df.apply(get_custom_category, axis=1)
-    
-    df['取得額'] = df['評価額'] - df['評価損益']
-    def calc_after_tax(row):
-        profit = row['評価損益']
-        if profit <= 0: return profit
-        if "NISA" in row['口座区分']: return profit
-        return profit * 0.79685
-    df['含み損益(税引後)'] = df.apply(calc_after_tax, axis=1)
-    df['含み損益(税引前)'] = df['評価損益']
+        # セクション見出し行から口座区分を検出（例：「■特定口座」「NISA預り（成長投資枠）」など）
+        acc_detect = normalize_account(line)
+        if acc_detect and line.count(',') <= 3:
+            current_account = acc_detect
 
-    return df
+        # ヘッダー行の判定
+        hit_count = sum(1 for kw in header_keywords if kw in line)
+        if hit_count >= 2 and ',' in line:
+            # このブロックの終了位置を探す
+            block_lines = [line]
+            i += 1
+            while i < n:
+                next_line = lines[i].strip()
+                if not next_line:
+                    break
+                # 次のヘッダーや別セクション見出しが来たらブロック終了
+                if next_line.count(',') <= 2 and any(k in next_line for k in ['合計', 'トータル', '預り', '口座', '一覧', '■', '◆']):
+                    break
+                if sum(1 for kw in header_keywords if kw in next_line) >= 2 and ('銘柄' in next_line or 'ファンド' in next_line):
+                    break
+                block_lines.append(next_line)
+                i += 1
 
-# --- ニュース・決算取得関数 ---
-@st.cache_data(ttl=3600)
-def fetch_news_rss(query):
-    encoded_query = urllib.parse.quote(query)
-    url = f"https://news.google.com/rss/search?q={encoded_query}&hl=ja&gl=JP&ceid=JP:ja"
-    feed = feedparser.parse(url)
-    return feed.entries[:5]
+            # ブロックをDataFrame化
+            try:
+                df_block = pd.read_csv(io.StringIO("\n".join(block_lines)), on_bad_lines='skip')
+                
+                # 列名の特定
+                col_name = next((c for c in df_block.columns if any(k in str(c) for k in ['銘柄・ファンド名', '銘柄名', 'ファンド名', 'ファンド', '銘柄', '商品名']) and 'コード' not in str(c)), None)
+                if not col_name:
+                    col_name = next((c for c in df_block.columns if any(k in str(c) for k in ['銘柄', 'ファンド', '商品'])), None)
 
-def analyze_sentiment(title):
-    pos_words = ['最高益', '増益', '急騰', 'ストップ高', '続伸', '好調', '買われる', '上方修正', '増配', '自社株買い', '提携']
-    neg_words = ['減益', '赤字', '急落', 'ストップ安', '続落', '不振', '売られる', '下方修正', '減配', '不正', '懸念', '提訴']
-    score = 0
-    if any(w in title for w in pos_words): score = 1
-    if any(w in title for w in neg_words): score = -1
-    return score
+                col_val = next((c for c in df_block.columns if any(k in str(c) for k in ['時価評価額[円]', '評価額[円]', '評価金額[円]', '時価評価額', '評価金額', '評価額']) and '外貨' not in str(c) and '損益' not in str(c)), None)
+                col_pnl = next((c for c in df_block.columns if any(k in str(c) for k in ['評価損益[円]', '評価損益額', '評価損益', 'トータルリターン', '含み損益']) and '率' not in str(c) and '％' not in str(c) and '%' not in str(c)), None)
+                col_cost = next((c for c in df_block.columns if any(k in str(c) for k in ['取得総額[円]', '取得総額', '取得金額', '買付金額'])), None)
+                col_acc = next((c for c in df_block.columns if any(k in str(c) for k in ['口座区分', '口座', '預り区分'])), None)
+                col_div = next((c for c in df_block.columns if any(k in str(c) for k in ['配当利回り', '分配金利回り', '利回り'])), None)
 
-# --- 各ページ描画関数 ---
+                if col_name and col_val:
+                    for _, row in df_block.iterrows():
+                        name_str = str(row[col_name]).strip()
+                        if not name_str or name_str in ['nan', 'None', '-', '合計', '総合計'] or '合計' in name_str:
+                            continue
+                        
+                        val_num = clean_num(row[col_val])
+                        if val_num <= 0:
+                            continue
 
-def render_dashboard(df_all):
-    # サイドバー設定
-    st.sidebar.markdown("---")
-    st.sidebar.header("⚙️ 表示設定")
-    metric_options = ['評価額', '取得額', '含み損益(税引前)', '含み損益(税引後)']
-    selected_metric = st.sidebar.selectbox("分析する金額を選択:", metric_options, index=0)
-    
-    # フィルタリング
-    with st.expander("✅ 分析対象の選択 & 利回り編集（クリックして開く）", expanded=False):
-        if '分析対象' not in df_all.columns:
-            df_all.insert(0, '分析対象', True)
-        
-        editor_cols = ['分析対象', '詳細区分', '銘柄名', 'セクター', '評価額', '予想利回り(%)']
-        edited_df = st.data_editor(
-            df_all[editor_cols],
-            column_config={
-                "分析対象": st.column_config.CheckboxColumn(default=True),
-                "詳細区分": st.column_config.SelectboxColumn(options=["個別株", "インデックス投信", "ゴールド", "債券", "その他投信"]),
-                "評価額": st.column_config.NumberColumn(format="%d"),
-                "予想利回り(%)": st.column_config.NumberColumn(format="%.1f %%", help="株式分割等を考慮した実質利回りを入力してください"),
-            },
-            use_container_width=True,
-            hide_index=True,
-            height=300
-        )
-    
-    df_filtered = df_all.iloc[edited_df.index].copy()
-    df_filtered['分析対象'] = edited_df['分析対象']
-    df_filtered['詳細区分'] = edited_df['詳細区分']
-    df_filtered['セクター'] = edited_df['セクター']
-    df_filtered['予想利回り(%)'] = edited_df['予想利回り(%)']
-    df_filtered = df_filtered[df_filtered['分析対象'] == True]
-    
-    if df_filtered.empty:
-        st.warning("分析対象がありません。")
-        return
+                        pnl_num = clean_num(row[col_pnl]) if col_pnl else 0.0
+                        
+                        # 取得額の決定（取得額列があればそれを使用、なければ 評価額 - 評価損益 で自動算出）
+                        if col_cost and clean_num(row[col_cost]) > 0:
+                            cost_num = clean_num(row[col_cost])
+                        else:
+                            cost_num = max(val_num - pnl_num, 0.0)
 
-    # KPI
-    total_val = df_filtered[selected_metric].sum()
-    total_profit = df_filtered['含み損益(税引前)'].sum()
-    rakuten_val = df_filtered[df_filtered['証券会社'] == '楽天証券'][selected_metric].sum()
-    sbi_val = df_filtered[df_filtered['証券会社'] == 'SBI証券'][selected_metric].sum()
-    
-    st.markdown("### 📈 Asset Overview")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric(f"合計 {selected_metric}", f"{total_val:,.0f} 円")
-    c2.metric("含み益 (税引前)", f"{total_profit:,.0f} 円", delta_color="normal")
-    c3.metric(f"楽天証券分", f"{rakuten_val:,.0f} 円")
-    c4.metric(f"SBI証券分", f"{sbi_val:,.0f} 円")
+                        # 口座区分の決定
+                        row_acc = current_account
+                        if col_acc:
+                            detected = normalize_account(row[col_acc])
+                            if detected:
+                                row_acc = detected
 
-    st.markdown("---")
+                        div_yield = clean_num(row[col_div]) if col_div else 0.0
 
-    # ツリーマップ
-    st.subheader(f"🗺️ 資産ヒートマップ ({selected_metric})")
-    df_filtered['損益率'] = df_filtered.apply(lambda x: (x['評価損益'] / (x['評価額'] - x['評価損益']) * 100) if (x['評価額'] - x['評価損益']) > 0 else 0, axis=1)
-    
-    fig_treemap = px.treemap(
-        df_filtered, 
-        path=[px.Constant("全資産"), '詳細区分', '銘柄名'], 
-        values=selected_metric,
-        color='損益率',
-        color_continuous_scale='RdBu_r',
-        color_continuous_midpoint=0,
-    )
-    fig_treemap.update_traces(textinfo="label+value+percent entry", hovertemplate='%{label}<br>金額: %{value:,.0f} 円<br>損益率: %{color:.2f}%')
-    st.plotly_chart(fig_treemap, use_container_width=True)
-
-    st.markdown("---")
-
-    # タブ分析
-    tab1, tab2, tab3 = st.tabs(["📊 セクター・国別", "🥧 資産内訳・口座", "💰 配当カレンダー"])
-    
-    def update_layout_common(fig):
-        fig.update_layout(yaxis=dict(tickformat=","), xaxis=dict(tickformat=","))
-        fig.update_traces(hovertemplate='%{label}: %{value:,.0f} 円')
-        return fig
-
-    with tab1:
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            fig_sec_pie = px.pie(df_filtered, values=selected_metric, names='セクター', title="セクター比率", hole=0.4)
-            fig_sec_pie.update_traces(textinfo='percent+label', hovertemplate='%{label}: %{value:,.0f} 円')
-            st.plotly_chart(fig_sec_pie, use_container_width=True)
-        with col_s2:
-            fig2 = px.pie(df_filtered, values=selected_metric, names='国・地域', title="国別比率", hole=0.4)
-            fig2.update_traces(textinfo='percent+label', hovertemplate='%{label}: %{value:,.0f} 円')
-            st.plotly_chart(fig2, use_container_width=True)
-
-    with tab2:
-        st.subheader("💡 資産内訳（詳細区分）")
-        col_new1, col_new2 = st.columns([1, 1])
-        with col_new1:
-            fig_custom = px.pie(
-                df_filtered, values=selected_metric, names='詳細区分', 
-                title="資産内訳 (個別株・インデックス投信・ゴールド・債券)",
-                hole=0.4,
-                color='詳細区分',
-                color_discrete_map={"個別株": "#1f77b4", "インデックス投信": "#2ca02c", "ゴールド": "#ff7f0e", "債券": "#d62728", "その他投信": "#7f7f7f"}
-            )
-            fig_custom.update_traces(textinfo='percent+label', hovertemplate='%{label}: %{value:,.0f} 円')
-            st.plotly_chart(fig_custom, use_container_width=True)
-        with col_new2:
-            acc_grp = df_filtered.groupby('口座区分')[selected_metric].sum().reset_index()
-            fig4 = px.bar(acc_grp, x='口座区分', y=selected_metric, color='口座区分', title="口座区分別残高")
-            fig4 = update_layout_common(fig4)
-            st.plotly_chart(fig4, use_container_width=True)
-
-    with tab3:
-        st.subheader("月別配当金シミュレーション (予想)")
-        monthly_div = {m: 0 for m in range(1, 13)}
-        
-        for _, row in df_filtered.iterrows():
-            yearly_yield = row['予想利回り(%)'] / 100
-            yearly_div_amount = row['評価額'] * yearly_yield
-            payment_months = row['配当月']
-            if not payment_months: continue
-            amount_per_payment = yearly_div_amount / len(payment_months)
-            for m in payment_months:
-                monthly_div[m] += amount_per_payment
-
-        df_monthly = pd.DataFrame(list(monthly_div.items()), columns=['月', '配当金額'])
-        total_year_div = df_monthly['配当金額'].sum()
-        total_assets_val = df_filtered['評価額'].sum()
-        avg_yield_port = (total_year_div / total_assets_val * 100) if total_assets_val > 0 else 0
-
-        c_d1, c_d2 = st.columns(2)
-        c_d1.metric("年間受取配当（税引前・予想）", f"{total_year_div:,.0f} 円")
-        c_d2.metric("平均利回り", f"{avg_yield_port:.2f} %")
-
-        fig_div = px.bar(df_monthly, x='月', y='配当金額', title="月別配当金グラフ", text_auto='.2s')
-        fig_div.update_xaxes(tickmode='linear', tick0=1, dtick=1)
-        fig_div = update_layout_common(fig_div)
-        st.plotly_chart(fig_div, use_container_width=True)
-
-def render_news(df_all):
-    st.header("📰 保有銘柄に関するニュース")
-    st.caption("※個別株のみを対象としています。")
-
-    stock_df = df_all[df_all['資産クラス'] == '個別株']
-    if stock_df.empty:
-        st.info("個別株データがありません。")
-        return
-
-    top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(10).index.tolist()
-    
-    for stock in top_stocks:
-        search_query = stock.replace('ホールディングス', 'HD').split(' ')[0] 
-        query = f"{search_query} 株価 ニュース"
-        entries = fetch_news_rss(query)
-        
-        if entries:
-            with st.expander(f"📌 {stock}", expanded=True):
-                for entry in entries:
-                    sentiment = analyze_sentiment(entry.title)
-                    icon = "📄"
-                    style = ""
-                    if sentiment == 1: icon, style = "📈", ":green-background[好材料?]"
-                    elif sentiment == -1: icon, style = "📉", ":red-background[警戒]"
-                    
-                    published = entry.get('published', '')[:16]
-                    st.markdown(f"{icon} {style} **[{entry.title}]({entry.link})**")
-                    st.caption(f"{entry.source.title} | {published}")
-
-def render_financials(df_all):
-    st.header("📅 決算・IR情報")
-    st.caption("保有銘柄の最新決算ニュースと、決算詳細（Kabutan）へのリンクを表示します。")
-
-    stock_df = df_all[df_all['資産クラス'] == '個別株'].copy()
-    if stock_df.empty:
-        st.info("個別株データがありません。")
-        return
-
-    # 銘柄コードがある場合はそれを使う、なければ銘柄名で頑張る
-    stock_df['コード'] = stock_df['コード'].astype(str).str.replace('.0', '', regex=False)
-    
-    # 評価額順にソート
-    stock_df_sorted = stock_df.groupby(['銘柄名', 'コード'])['評価額'].sum().reset_index().sort_values('評価額', ascending=False)
-
-    for _, row in stock_df_sorted.iterrows():
-        name = row['銘柄名']
-        code = row['コード']
-        
-        with st.expander(f"📊 {name} ({code if code else 'コード不明'})", expanded=False):
-            c_link, c_news = st.columns([1, 2])
-            
-            with c_link:
-                st.markdown("##### 🔗 外部サイト")
-                if code and code != "nan" and code != "":
-                    kabutan_url = f"https://kabutan.jp/stock/finance?code={code}"
-                    nikkei_url = f"https://www.nikkei.com/nkd/company/kessan/?scode={code}"
-                    st.link_button(f"Kabutanで決算を見る ({code})", kabutan_url)
-                    st.link_button(f"日経で決算予定を見る ({code})", nikkei_url)
-                else:
-                    st.warning("CSVに銘柄コードが含まれていないため、リンクを生成できません。")
-            
-            with c_news:
-                st.markdown("##### 📰 最新の決算ニュース")
-                query = f"{name} 決算"
-                entries = fetch_news_rss(query)
-                if entries:
-                    for entry in entries[:3]:
-                        st.markdown(f"- [{entry.title}]({entry.link})")
-                        st.caption(f"{entry.get('published', '')[:10]}")
-                else:
-                    st.caption("直近の決算ニュースは見つかりませんでした。")
-
-def render_ai_advice(df_all):
-    st.header("🤖 AIポートフォリオ診断 (Pro)")
-    st.info("プロのアナリスト視点でのアドバイスを行います。")
-
-    total_assets = df_all['評価額'].sum()
-    stock_df = df_all[df_all['資産クラス'] == '個別株']
-    top_stocks = stock_df.groupby('銘柄名')['評価額'].sum().sort_values(ascending=False).head(3)
-    
-    st.subheader("1. 資産健康診断")
-    c_good, c_bad = st.columns(2)
-
-    with c_good:
-        st.success("##### 👍 良い点 (Strengths)")
-        div_yield = (df_all['評価額'] * df_all['予想利回り(%)']).sum() / total_assets
-        if div_yield > 2.5:
-            st.markdown(f"- **インカムゲインが太い**: 平均利回り {div_yield:.1f}%。配当収入が期待できます。")
+                        records.append({
+                            '証券会社': broker_name,
+                            '口座区分': row_acc,
+                            '銘柄名': name_str,
+                            '評価額': val_num,
+                            '取得額': cost_num,
+                            '評価損益': val_num - cost_num,
+                            '配当利回り(%)': div_yield
+                        })
+            except Exception:
+                pass
         else:
-            st.markdown("- **キャピタルゲイン重視**: 値上がり益を狙える構成です。")
-        
-        nisa_assets = df_all[df_all['口座区分'].str.contains('NISA')]['評価額'].sum()
-        nisa_ratio = (nisa_assets / total_assets) * 100
-        if nisa_ratio > 40:
-             st.markdown(f"- **NISA活用が優秀**: 資産の {nisa_ratio:.1f}% が非課税運用されています。")
+            i += 1
+
+    return pd.DataFrame(records)
+
+# --- サイドバー：CSVアップロード & サンプルデータ ---
+with st.sidebar:
+    st.header("📂 1. データ取り込み")
+    file_rakuten = st.file_uploader("楽天証券 CSV", type=['csv'])
+    file_sbi = st.file_uploader("SBI証券 CSV", type=['csv'])
     
-    with c_bad:
-        st.error("##### 👎 懸念点 (Weaknesses)")
-        if not top_stocks.empty:
-            top_stock_ratio = (top_stocks.iloc[0] / total_assets) * 100
-            if top_stock_ratio > 20:
-                st.markdown(f"- **集中リスク**: 「{top_stocks.index[0]}」に資産の {top_stock_ratio:.1f}% が集中しています。")
-            else:
-                st.markdown("- **大きな懸念なし**: 特定銘柄への過度な集中は見られません。")
-        
-        bond_gold_ratio = df_all[df_all['詳細区分'].isin(['債券', 'ゴールド'])]['評価額'].sum() / total_assets * 100
-        if bond_gold_ratio < 5:
-            st.markdown("- **守りが手薄**: 債券・ゴールドの比率が低く、市場暴落時の耐性が低めです。")
+    st.markdown("---")
+    st.header("⚙️ 2. 配当設定データの読込")
+    st.caption("過去にこのアプリで保存した配当設定付CSVがあれば読み込めます")
+    file_saved = st.file_uploader("保存済みデータ CSV (任意)", type=['csv'])
 
     st.markdown("---")
-    st.subheader("2. 警戒すべきニュースと具体的対策")
-    
-    if top_stocks.empty:
-        st.write("個別株保有なし")
+    use_demo = st.checkbox("🧪 デモデータで試す（CSVなしで確認）", value=False)
+
+# --- データの統合処理 ---
+df_list = []
+
+if file_saved:
+    try:
+        df_saved = pd.read_csv(file_saved)
+        df_list.append(df_saved)
+    except Exception as e:
+        st.sidebar.error(f"保存データの読込エラー: {e}")
+
+if file_rakuten:
+    df_r = parse_broker_csv(file_rakuten, '楽天証券')
+    if not df_r.empty:
+        df_list.append(df_r)
     else:
-        found_alert = False
-        for stock_name, val in top_stocks.items():
-            search_query = stock_name.replace('ホールディングス', 'HD').split(' ')[0]
-            query = f"{search_query} 株価 ニュース"
-            entries = fetch_news_rss(query)
-            neg_news = [e for e in entries if analyze_sentiment(e.title) == -1]
-            
-            if neg_news:
-                found_alert = True
-                with st.expander(f"⚠️ **緊急: {stock_name} に警戒シグナル**", expanded=True):
-                    for news in neg_news:
-                        st.markdown(f"- 📰 [{news.title}]({news.link})")
-                    st.markdown("""
-                    **【対策】** ストーリーが崩れた場合は損切りを検討。逆指値の設定を推奨します。
-                    """)
-        if not found_alert:
-            st.info("✅ 現在、主力銘柄に関して致命的なニュースは見当たりません。")
+        st.sidebar.warning("楽天証券CSVから有効な明細を検出できませんでした。")
 
-    st.markdown("---")
-    st.subheader("3. 今後のアクションプラン")
-    with st.chat_message("assistant", avatar="🧑‍💼"):
-        rec = []
-        if bond_gold_ratio < 10: rec.append("**守りの強化**: ゴールドや債券ETFを少し追加し、リスクを分散させましょう。")
-        if div_yield < 1.5: rec.append("**インカム強化**: 高配当株（VYMなど）を組み入れ、キャッシュフローを安定させましょう。")
-        if not rec: rec.append("**継続**: 非常に良いバランスです。現状の積立を継続してください。")
-        for r in rec: st.markdown(f"- {r}")
-
-# --- メイン処理 ---
-st.sidebar.title("My Asset Manager")
-page = st.sidebar.radio("メニュー", ["📊 保有資産内訳", "📅 決算・IR情報", "📰 保有銘柄ニュース", "🤖 AIポートフォリオ診断"], index=0)
-st.sidebar.markdown("---")
-st.sidebar.header("📂 データ取り込み")
-st.sidebar.caption("対応：楽天証券、SBI証券")
-uploaded_files = st.sidebar.file_uploader("CSVをアップロード", type=['csv'], accept_multiple_files=True)
-
-if uploaded_files:
-    df_list = []
-    for file in uploaded_files:
-        content = file.getvalue()
-        text = detect_encoding(content)
-        df_temp = universal_parser(text)
-        if not df_temp.empty:
-            df_list.append(df_temp)
-    
-    if df_list:
-        df_all = pd.concat(df_list, ignore_index=True)
-        df_all = guess_attributes(df_all)
-        
-        if page == "📊 保有資産内訳":
-            render_dashboard(df_all)
-        elif page == "📅 決算・IR情報":
-            render_financials(df_all)
-        elif page == "📰 保有銘柄ニュース":
-            render_news(df_all)
-        elif page == "🤖 AIポートフォリオ診断":
-            render_ai_advice(df_all)
+if file_sbi:
+    df_s = parse_broker_csv(file_sbi, 'SBI証券')
+    if not df_s.empty:
+        df_list.append(df_s)
     else:
-        st.error("CSVを読み込めませんでした。")
+        st.sidebar.warning("SBI証券CSVから有効な明細を検出できませんでした。")
+
+if use_demo and not df_list:
+    demo_data = [
+        {'証券会社': 'SBI証券', '口座区分': 'NISA', '銘柄名': 'eMAXIS Slim 全世界株式(オール・カントリー)', '評価額': 4500000, '取得額': 3200000, '評価損益': 1300000, '配当利回り(%)': 0.0},
+        {'証券会社': 'SBI証券', '口座区分': 'NISA', '銘柄名': 'バンガード・米国高配当株式ETF (VYM)', '評価額': 2800000, '取得額': 2100000, '評価損益': 700000, '配当利回り(%)': 3.1},
+        {'証券会社': 'SBI証券', '口座区分': '特定', '銘柄名': '三菱商事 (8058)', '評価額': 1800000, '取得額': 1200000, '評価損益': 600000, '配当利回り(%)': 3.8},
+        {'証券会社': 'SBI証券', '口座区分': '特定', '銘柄名': '三井住友フィナンシャルG (8316)', '評価額': 1500000, '取得額': 950000, '評価損益': 550000, '配当利回り(%)': 4.2},
+        {'証券会社': '楽天証券', '口座区分': 'NISA', '銘柄名': '楽天・全米株式インデックス・ファンド', '評価額': 3200000, '取得額': 2400000, '評価損益': 800000, '配当利回り(%)': 0.0},
+        {'証券会社': '楽天証券', '口座区分': '特定', '銘柄名': 'SPDR ポートフォリオS&P 500高配当株式ETF (SPYD)', '評価額': 2200000, '取得額': 1900000, '評価損益': 300000, '配当利回り(%)': 4.5},
+        {'証券会社': '楽天証券', '口座区分': '一般', '銘柄名': '日本たばこ産業 (2914)', '評価額': 1200000, '取得額': 900000, '評価損益': 300000, '配当利回り(%)': 4.6},
+    ]
+    df_list.append(pd.DataFrame(demo_data))
+
+if df_list:
+    df_master = pd.concat(df_list, ignore_index=True)
+    for col in ['評価額', '取得額', '評価損益', '配当利回り(%)']:
+        if col not in df_master.columns:
+            df_master[col] = 0.0
+        df_master[col] = df_master[col].apply(clean_num)
+    if '口座区分' not in df_master.columns:
+        df_master['口座区分'] = '特定'
 else:
-    st.info("👈 左側のサイドバーからCSVファイルをアップロードしてください。")
+    df_master = pd.DataFrame(columns=['証券会社', '口座区分', '銘柄名', '評価額', '取得額', '評価損益', '配当利回り(%)'])
 
+# 現在の総資産額（シミュレーションの初期値に連動）
+current_total_valuation = float(df_master['評価額'].sum()) if not df_master.empty else 10000000.0
+current_total_cost = float(df_master['取得額'].sum()) if not df_master.empty else 8000000.0
+
+# --- タブ構成 ---
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 1. 総合ダッシュボード",
+    "🎁 2. 配当データ分析",
+    "📈 3. 積立シミュレーション",
+    "🏖️ 4. サイドFIRE診断",
+    "⚡ 5. 暴落ストレステスト & 4%ルール"
+])
+
+# ==============================================================================
+# TAB 1: 総合ダッシュボード
+# ==============================================================================
+with tab1:
+    if df_master.empty:
+        st.info("👈 左のサイドバーから楽天証券・SBI証券のCSVをアップロードするか、「🧪 デモデータで試す」にチェックを入れてください。")
+    else:
+        total_pnl = current_total_valuation - current_total_cost
+        pnl_ratio = (total_pnl / current_total_cost * 100) if current_total_cost > 0 else 0.0
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("総資産額（現時点評価額）", f"{current_total_valuation:,.0f} 円")
+        c2.metric("投資元本（取得額合計）", f"{current_total_cost:,.0f} 円")
+        c3.metric("トータル含み損益", f"{total_pnl:+,.0f} 円", f"{pnl_ratio:+.2f} %")
+        c4.metric("保有銘柄数", f"{len(df_master)} 銘柄")
+
+        st.markdown("---")
+        col_g1, col_g2 = st.columns(2)
+
+        with col_g1:
+            st.subheader("🗺️ ポートフォリオ・ツリーマップ")
+            st.caption("面積＝評価額の大きさ、色＝含み損益額を表します")
+            fig_tree = px.treemap(
+                df_master,
+                path=[px.Constant("全資産"), '証券会社', '口座区分', '銘柄名'],
+                values='評価額',
+                color='評価損益',
+                color_continuous_scale='RdYlGn',
+                color_continuous_midpoint=0
+            )
+            fig_tree.update_layout(margin=dict(t=20, l=10, r=10, b=10))
+            st.plotly_chart(fig_tree, use_container_width=True)
+
+        with col_g2:
+            st.subheader("🏦 証券会社 × 口座区分 内訳")
+            fig_bar = px.bar(
+                df_master.groupby(['証券会社', '口座区分'], as_index=False)['評価額'].sum(),
+                x='証券会社', y='評価額', color='口座区分', barmode='group',
+                text_auto=',.0f', title="証券会社・口座別の資産残高"
+            )
+            st.plotly_chart(fig_bar, use_container_width=True)
+
+        st.subheader("📋 全保有銘柄一覧")
+        st.dataframe(df_master.sort_values('評価額', ascending=False), use_container_width=True, hide_index=True)
+
+# ==============================================================================
+# TAB 2: 配当データ分析機能
+# ==============================================================================
+with tab2:
+    st.subheader("🎁 条件別 ポートフォリオ＆配当データ分析")
+    
+    if df_master.empty:
+        st.warning("分析するデータがありません。サイドバーからCSVをアップロードするか、デモデータを有効にしてください。")
+    else:
+        # --- 1. 抽出・計算条件の選択パネル ---
+        with st.container(border=True):
+            st.markdown("##### 🔍 分析条件の選択")
+            f_col1, f_col2, f_col3 = st.columns(3)
+            
+            with f_col1:
+                selected_brokers = st.multiselect(
+                    "① 対象証券会社",
+                    options=['SBI証券', '楽天証券'],
+                    default=['SBI証券', '楽天証券']
+                )
+            with f_col2:
+                asset_basis = st.radio(
+                    "② 総資産額・利回り算出基準",
+                    options=['現時点評価額（時価ベース）', '取得額（簿価 / YOCベース）'],
+                    horizontal=False
+                )
+            with f_col3:
+                selected_accounts = st.multiselect(
+                    "③ 口座別フィルタ",
+                    options=['NISA', '特定', '一般'],
+                    default=['NISA', '特定', '一般']
+                )
+
+        basis_col = '評価額' if '現時点評価額' in asset_basis else '取得額'
+
+        # --- 2. 配当利回りの入力・編集テーブル ---
+        with st.expander("✏️ 銘柄ごとの配当利回り(%)を入力・調整する（クリックで開閉）", expanded=True):
+            st.caption("※CSVに配当利回りが含まれていない場合、下の表の「配当利回り(%)」列をダブルクリックして直接入力できます。")
+            
+            bulk_col1, bulk_col2 = st.columns([1, 3])
+            with bulk_col1:
+                default_yield = st.number_input("未設定(0%)銘柄への一括仮利回り(%)", min_value=0.0, max_value=20.0, value=0.0, step=0.1)
+                if st.button("0%の銘柄に一括適用"):
+                    df_master.loc[df_master['配当利回り(%)'] == 0, '配当利回り(%)'] = default_yield
+
+            edited_df = st.data_editor(
+                df_master,
+                column_config={
+                    "配当利回り(%)": st.column_config.NumberColumn(
+                        "配当利回り(%) ✏️",
+                        help="時価に対する年間配当利回り(%)を入力してください",
+                        min_value=0.0,
+                        max_value=50.0,
+                        step=0.1,
+                        format="%.2f %%"
+                    ),
+                    "評価額": st.column_config.NumberColumn("現時点評価額(円)", format="¥%d"),
+                    "取得額": st.column_config.NumberColumn("取得額(円)", format="¥%d"),
+                    "評価損益": st.column_config.NumberColumn("評価損益(円)", format="¥%d"),
+                },
+                disabled=['証券会社', '口座区分', '銘柄名', '評価損益'],
+                use_container_width=True,
+                hide_index=True,
+                key="dividend_editor"
+            )
+
+            # 編集済みデータのダウンロード保存機能
+            csv_save = edited_df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="💾 入力した配当利回りデータをCSVで保存（次回からサイドバーで読込可能）",
+                data=csv_save,
+                file_name="my_portfolio_with_dividend.csv",
+                mime="text/csv"
+            )
+
+        # --- 3. フィルタ適用と配当計算 ---
+        df_filtered = edited_df[
+            (edited_df['証券会社'].isin(selected_brokers)) &
+            (edited_df['口座区分'].isin(selected_accounts))
+        ].copy()
+
+        if df_filtered.empty:
+            st.warning("選択された条件に一致する銘柄がありません。")
+        else:
+            # 年間配当額（税引前）の算出
+            # ※入力された利回りを「選択した基準額（評価額 or 取得額）」に掛けるか、時価に対する配当額からYOCを出すか選択可能に
+            df_filtered['基準資産額'] = df_filtered[basis_col]
+            df_filtered['年間配当額(税引前)'] = df_filtered['評価額'] * (df_filtered['配当利回り(%)'] / 100.0)
+            
+            # 税引後配当額（NISAは100%、特定・一般は20.315%課税で79.685%）
+            df_filtered['税率'] = df_filtered['口座区分'].apply(lambda x: 0.0 if x == 'NISA' else 0.20315)
+            df_filtered['年間配当額(税引後)'] = df_filtered['年間配当額(税引前)'] * (1.0 - df_filtered['税率'])
+            
+            # 選択基準（評価額 or 取得額）に対する実質利回り
+            df_filtered['基準対比利回り(税引前%)'] = np.where(
+                df_filtered['基準資産額'] > 0,
+                df_filtered['年間配当額(税引前)'] / df_filtered['基準資産額'] * 100.0,
+                0.0
+            )
+            df_filtered['基準対比利回り(税引後%)'] = np.where(
+                df_filtered['基準資産額'] > 0,
+                df_filtered['年間配当額(税引後)'] / df_filtered['基準資産額'] * 100.0,
+                0.0
+            )
+
+            # --- 4. 分析サマリーKPI ---
+            sum_target_asset = df_filtered['基準資産額'].sum()
+            sum_div_pre = df_filtered['年間配当額(税引前)'].sum()
+            sum_div_post = df_filtered['年間配当額(税引後)'].sum()
+            portfolio_yield_pre = (sum_div_pre / sum_target_asset * 100.0) if sum_target_asset > 0 else 0.0
+            portfolio_yield_post = (sum_div_post / sum_target_asset * 100.0) if sum_target_asset > 0 else 0.0
+
+            st.markdown("---")
+            st.markdown(f"#### 📊 選択条件での分析結果（基準：{asset_basis}）")
+            
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric(f"対象総資産額 ({basis_col})", f"{sum_target_asset:,.0f} 円")
+            k2.metric("年間配当金（税引前）", f"{sum_div_pre:,.0f} 円", f"利回り {portfolio_yield_pre:.2f} %")
+            k3.metric("年間配当金（税引後・手取り）", f"{sum_div_post:,.0f} 円", f"実質利回り {portfolio_yield_post:.2f} %")
+            k4.metric("月平均の手取り配当金", f"{sum_div_post / 12.0:,.0f} 円/月")
+
+            # --- 5. グラフ可視化 ---
+            g_col1, g_col2 = st.columns(2)
+            with g_col1:
+                df_div_only = df_filtered[df_filtered['年間配当額(税引後)'] > 0]
+                if not df_div_only.empty:
+                    fig_div_pie = px.pie(
+                        df_div_only, values='年間配当額(税引後)', names='銘柄名',
+                        title="銘柄別 手取り配当金 構成比", hole=0.4
+                    )
+                    fig_div_pie.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig_div_pie, use_container_width=True)
+                else:
+                    st.info("配当利回り(%)が0%より大きい銘柄を入力すると、ここに配当構成比グラフが表示されます。")
+
+            with g_col2:
+                fig_acc_div = px.bar(
+                    df_filtered.groupby(['証券会社', '口座区分'], as_index=False)[['基準資産額', '年間配当額(税引後)']].sum(),
+                    x='口座区分', y='年間配当額(税引後)', color='証券会社', barmode='group',
+                    text_auto=',.0f', title="口座区分 × 証券会社別 年間手取り配当額"
+                )
+                st.plotly_chart(fig_acc_div, use_container_width=True)
+
+            st.markdown("##### 📋 条件抽出銘柄の配当詳細リスト")
+            display_cols = ['証券会社', '口座区分', '銘柄名', '基準資産額', '年間配当額(税引前)', '年間配当額(税引後)', '基準対比利回り(税引前%)', '基準対比利回り(税引後%)']
+            st.dataframe(
+                df_filtered[display_cols].sort_values('年間配当額(税引後)', ascending=False).style.format({
+                    '基準資産額': '{:,.0f} 円',
+                    '年間配当額(税引前)': '{:,.0f} 円',
+                    '年間配当額(税引後)': '{:,.0f} 円',
+                    '基準対比利回り(税引前%)': '{:.2f} %',
+                    '基準対比利回り(税引後%)': '{:.2f} %',
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+
+# ==============================================================================
+# TAB 3: 積み立て想定シミュレーション（10年・20年・30年）
+# ==============================================================================
+with tab3:
+    st.subheader("📈 積立投資 将来資産シミュレーション（1〜30年）")
+    
+    with st.container(border=True):
+        s_col1, s_col2, s_col3 = st.columns(3)
+        with s_col1:
+            sim_initial = st.number_input(
+                "現在の総資産額（初期投資額・円）",
+                min_value=0, max_value=1000000000,
+                value=int(current_total_valuation), step=100000,
+                help="CSVから読み取った総資産額が自動セットされています（自由に変更可能）"
+            )
+        with s_col2:
+            sim_monthly = st.number_input(
+                "毎月の積立額（円）",
+                min_value=0, max_value=10000000,
+                value=100000, step=10000
+            )
+        with s_col3:
+            sim_rate = st.number_input(
+                "想定運用利回り（年率 %）",
+                min_value=0.0, max_value=30.0,
+                value=5.0, step=0.1
+            )
+
+    # 月次複利で1年目〜30年目まで計算
+    monthly_rate = (sim_rate / 100.0) / 12.0
+    sim_rows = []
+    balance = float(sim_initial)
+    principal = float(sim_initial)
+
+    for year in range(1, 31):
+        prev_balance = balance
+        for _ in range(12):
+            balance = balance * (1.0 + monthly_rate) + sim_monthly
+            principal += sim_monthly
+        profit = balance - principal
+        yearly_gain = balance - prev_balance
+        sim_rows.append({
+            '経過年数': f"{year}年目",
+            '年数_数値': year,
+            '元本合計(円)': round(principal),
+            '運用益合計(円)': round(profit),
+            '総資産想定額(円)': round(balance),
+            '年間増加額(円)': round(yearly_gain)
+        })
+
+    df_sim = pd.DataFrame(sim_rows)
+
+    # 10年・20年・30年 マイルストーン表示
+    st.markdown("#### 🎯 10年・20年・30年後の到達マイルストーン")
+    m10 = df_sim[df_sim['年数_数値'] == 10].iloc[0]
+    m20 = df_sim[df_sim['年数_数値'] == 20].iloc[0]
+    m30 = df_sim[df_sim['年数_数値'] == 30].iloc[0]
+
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("【10年後】総資産想定額", f"{m10['総資産想定額(円)']:,.0f} 円", f"うち運用益 +{m10['運用益合計(円)']:,.0f} 円")
+    mc2.metric("【20年後】総資産想定額", f"{m20['総資産想定額(円)']:,.0f} 円", f"うち運用益 +{m20['運用益合計(円)']:,.0f} 円")
+    mc3.metric("【30年後】総資産想定額", f"{m30['総資産想定額(円)']:,.0f} 円", f"うち運用益 +{m30['運用益合計(円)']:,.0f} 円")
+
+    # 積み上げ棒グラフ（元本 vs 運用益）
+    st.markdown("#### 📊 年次別 総資産推移グラフ（元本 ＋ 運用益）")
+    fig_sim = go.Figure()
+    fig_sim.add_trace(go.Bar(
+        x=df_sim['経過年数'], y=df_sim['元本合計(円)'],
+        name='投資元本（初期資産＋積立累計）', marker_color='#3b82f6'
+    ))
+    fig_sim.add_trace(go.Bar(
+        x=df_sim['経過年数'], y=df_sim['運用益合計(円)'],
+        name='複利運用益', marker_color='#10b981'
+    ))
+    fig_sim.update_layout(
+        barmode='stack',
+        xaxis_title='経過年数',
+        yaxis_title='金額（円）',
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        hovermode="x unified"
+    )
+    st.plotly_chart(fig_sim, use_container_width=True)
+
+    # 年次別シミュレーション表（10年/20年/30年切り替え可能）
+    st.markdown("#### 📋 年次別 総資産想定額 一覧表")
+    view_span = st.radio("表示期間の切り替え", ["10年目まで", "20年目まで", "30年目まで（全期間）"], index=2, horizontal=True)
+    max_y = 10 if "10" in view_span else (20 if "20" in view_span else 30)
+    
+    df_sim_view = df_sim[df_sim['年数_数値'] <= max_y].drop(columns=['年数_数値'])
+    st.dataframe(
+        df_sim_view.style.format({
+            '元本合計(円)': '{:,.0f} 円',
+            '運用益合計(円)': '{:,.0f} 円',
+            '総資産想定額(円)': '{:,.0f} 円',
+            '年間増加額(円)': '+{:,.0f} 円'
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# ==============================================================================
+# TAB 4: サイドFIRE シミュレーション機能
+# ==============================================================================
+with tab4:
+    st.subheader("🏖️ サイドFIRE 実現可能性シミュレーター")
+    st.caption("現在の資産・サイドFIRE予定年月・副業収入・年金・生活費から、資産が枯渇せずに維持できるかを精緻にシミュレーションします。")
+
+    now_dt = datetime.now()
+    cur_year, cur_month = now_dt.year, now_dt.month
+
+    with st.container(border=True):
+        st.markdown("##### ⚙️ シミュレーション前提条件の入力")
+        f_c1, f_c2, f_c3 = st.columns(3)
+
+        with f_c1:
+            st.markdown("**① 現在の資産と運用条件**")
+            fire_init_asset = st.number_input("現在の総資産額（円）", min_value=0, max_value=1000000000, value=int(current_total_valuation), step=100000, key="f_init")
+            fire_yield = st.number_input("想定運用利回り（年率 %）", min_value=0.0, max_value=25.0, value=5.0, step=0.1, key="f_yield")
+            pre_fire_saving = st.number_input("サイドFIRE達成までの毎月積立額（円）", min_value=0, max_value=5000000, value=100000, step=10000)
+            inflation_rate = st.number_input("想定インフレ率（生活費の上昇率・年率 %）", min_value=0.0, max_value=10.0, value=1.0, step=0.1)
+
+        with f_c2:
+            st.markdown("**② サイドFIRE・年金スケジュール**")
+            sc1, sc2 = st.columns(2)
+            fire_year = sc1.number_input("サイドFIRE予定（年）", min_value=cur_year, max_value=cur_year + 50, value=cur_year + 5)
+            fire_month = sc2.number_input("サイドFIRE予定（月）", min_value=1, max_value=12, value=4)
+            
+            pc1, pc2 = st.columns(2)
+            pension_year = pc1.number_input("年金受給開始（年）", min_value=cur_year, max_value=cur_year + 70, value=cur_year + 20)
+            pension_month = pc2.number_input("年金受給開始（月）", min_value=1, max_value=12, value=4)
+            
+            sim_years_total = st.slider("シミュレーション検証期間（今後何年間を検証するか）", min_value=20, max_value=60, value=45)
+
+        with f_c3:
+            st.markdown("**③ サイドFIRE後の月次収支**")
+            living_cost_monthly = st.number_input("想定生活費（月額・円）", min_value=50000, max_value=2000000, value=250000, step=10000)
+            side_income_monthly = st.number_input("副業想定収入（手取り月額・円）", min_value=0, max_value=2000000, value=100000, step=10000)
+            side_job_end_Option = st.selectbox("副業の継続期間", ["年金受給開始まで継続", "サイドFIRE後10年間のみ", "サイドFIRE後15年間のみ", "生涯継続"])
+            pension_monthly = st.number_input("年金予定額（手取り月額・円）", min_value=0, max_value=1000000, value=150000, step=10000)
+
+    # --- 月次キャッシュフローシミュレーション計算 ---
+    start_date = datetime(cur_year, cur_month, 1)
+    fire_date = datetime(int(fire_year), int(fire_month), 1)
+    pension_date = datetime(int(pension_year), int(pension_month), 1)
+
+    m_return = (fire_yield / 100.0) / 12.0
+    m_inflation = (inflation_rate / 100.0) / 12.0
+
+    asset_bal = float(fire_init_asset)
+    asset_at_fire = float(fire_init_asset) if fire_date <= start_date else None
+    depletion_date = None
+
+    yearly_records = []
+    total_months = sim_years_total * 12
+
+    y_saving = 0.0
+    y_side_inc = 0.0
+    y_pension_inc = 0.0
+    y_living_exp = 0.0
+    y_inv_gain = 0.0
+
+    for m in range(total_months):
+        curr_dt = start_date + relativedelta(months=m)
+        is_fired = curr_dt >= fire_date
+        is_pension = curr_dt >= pension_date
+
+        if is_fired and asset_at_fire is None:
+            asset_at_fire = asset_bal
+
+        # インフレ考慮後の生活費
+        adj_living_cost = living_cost_monthly * ((1.0 + m_inflation) ** m)
+
+        if not is_fired:
+            # サイドFIRE前（資産形成期）
+            inv_gain = asset_bal * m_return
+            asset_bal = asset_bal + inv_gain + pre_fire_saving
+            y_saving += pre_fire_saving
+            y_inv_gain += inv_gain
+        else:
+            # サイドFIRE後
+            # 副業収入の判定
+            months_since_fire = (curr_dt.year - fire_date.year) * 12 + (curr_dt.month - fire_date.month)
+            active_side_job = True
+            if side_job_end_Option == "年金受給開始まで継続" and is_pension:
+                active_side_job = False
+            elif side_job_end_Option == "サイドFIRE後10年間のみ" and months_since_fire >= 120:
+                active_side_job = False
+            elif side_job_end_Option == "サイドFIRE後15年間のみ" and months_since_fire >= 180:
+                active_side_job = False
+
+            cur_side = side_income_monthly if active_side_job else 0.0
+            cur_pen = pension_monthly if is_pension else 0.0
+
+            net_cashflow = cur_side + cur_pen - adj_living_cost  # マイナスなら資産取り崩し
+            inv_gain = asset_bal * m_return if asset_bal > 0 else 0.0
+            asset_bal = asset_bal + inv_gain + net_cashflow
+
+            if asset_bal <= 0 and depletion_date is None:
+                depletion_date = curr_dt
+
+            y_side_inc += cur_side
+            y_pension_inc += cur_pen
+            y_living_exp += adj_living_cost
+            y_inv_gain += inv_gain
+
+        # 12ヶ月ごと（1年単位）に集計記録
+        if (m + 1) % 12 == 0:
+            year_num = (m + 1) // 12
+            status_str = "積立期" if not is_fired else ("年金＋サイドFIRE" if is_pension else "サイドFIRE期")
+            yearly_records.append({
+                '西暦': f"{curr_dt.year}年",
+                '経過年': f"{year_num}年後",
+                'ステータス': status_str,
+                '年間積立額': round(y_saving),
+                '年間副業収入': round(y_side_inc),
+                '年間年金収入': round(y_pension_inc),
+                '年間生活費(インフレ込)': round(y_living_exp),
+                '年間運用益': round(y_inv_gain),
+                '年間資産増減': round(y_saving + y_side_inc + y_pension_inc - y_living_exp + y_inv_gain),
+                '年末資産残高': round(max(asset_bal, 0))
+            })
+            y_saving = y_side_inc = y_pension_inc = y_living_exp = y_inv_gain = 0.0
+
+    df_fire_sim = pd.DataFrame(yearly_records)
+    if asset_at_fire is None:
+        asset_at_fire = asset_bal
+
+    # --- 診断結果の表示 ---
+    st.markdown("---")
+    st.markdown("#### 🩺 サイドFIRE 実現可能性 判定結果")
+
+    fire_gap_monthly = max(living_cost_monthly - side_income_monthly, 0)
+    required_fire_asset_4pct = fire_gap_monthly * 12 * 25  # 不足生活費の25年分（4%ルール基準）
+
+    if depletion_date is None and df_fire_sim.iloc[-1]['年末資産残高'] >= asset_at_fire:
+        st.success(f"🎉 **【判定：大成功（余裕でサイドFIRE可能）】** {fire_year}年{fire_month}月にサイドFIREしても資産は一切枯渇せず、運用益が取り崩しを上回り資産が増え続けます！")
+    elif depletion_date is None:
+        st.info(f"✅ **【判定：サイドFIRE可能】** 資産を取り崩しながらも、今後{sim_years_total}年間（{cur_year + sim_years_total}年まで）資産が枯渇せず維持できます。")
+    else:
+        st.error(f"⚠️ **【判定：資金枯渇リスクあり】** この条件では **{depletion_date.year}年{depletion_date.month}月頃** に資産が枯渇する見込みです。サイドFIRE時期を遅らせるか、副業収入・生活費の見直しを推奨します。")
+
+    fk1, fk2, fk3, fk4 = st.columns(4)
+    fk1.metric(f"サイドFIRE時点({fire_year}/{fire_month})の想定資産", f"{asset_at_fire:,.0f} 円")
+    fk2.metric("FIRE直後の毎月不足額(生活費-副業)", f"{fire_gap_monthly:,.0f} 円/月")
+    fk3.metric("4%ルール上の必要目標資産", f"{required_fire_asset_4pct:,.0f} 円", f"過不足: {asset_at_fire - required_fire_asset_4pct:+,.0f} 円")
+    fk4.metric(f"{sim_years_total}年後の最終資産残高", f"{df_fire_sim.iloc[-1]['年末資産残高']:,.0f} 円")
+
+    # 推移グラフ
+    fig_fire = go.Figure()
+    fig_fire.add_trace(go.Scatter(
+        x=df_fire_sim['西暦'], y=df_fire_sim['年末資産残高'],
+        mode='lines+markers', name='年末資産残高',
+        fill='tozeroy', line=dict(color='#10b981', width=3)
+    ))
+    fig_fire.add_vline(x=f"{fire_year}年", line_dash="dash", line_color="orange", annotation_text="サイドFIRE開始")
+    if pension_year <= cur_year + sim_years_total:
+        fig_fire.add_vline(x=f"{pension_year}年", line_dash="dash", line_color="blue", annotation_text="年金受給開始")
+    fig_fire.update_layout(title="サイドFIRE後の長期資産残高推移", xaxis_title="年", yaxis_title="資産残高（円）", hovermode="x unified")
+    st.plotly_chart(fig_fire, use_container_width=True)
+
+    st.markdown("##### 📋 年次別 キャッシュフロー＆資産推移表")
+    st.dataframe(
+        df_fire_sim.style.format({
+            '年間積立額': '{:,.0f} 円',
+            '年間副業収入': '{:,.0f} 円',
+            '年間年金収入': '{:,.0f} 円',
+            '年間生活費(インフレ込)': '{:,.0f} 円',
+            '年間運用益': '{:,.0f} 円',
+            '年間資産増減': '{:+,.0f} 円',
+            '年末資産残高': '{:,.0f} 円',
+        }),
+        use_container_width=True,
+        hide_index=True
+    )
+
+# ==============================================================================
+# TAB 5: 暴落ストレステスト & 4%ルール生活費カバー率診断（追加プロ機能）
+# ==============================================================================
+with tab5:
+    st.subheader("⚡ プロ機能：暴落ストレステスト & 4%ルール診断")
+    
+    col_p1, col_p2 = st.columns(2)
+    
+    with col_p1:
+        st.markdown("#### 📉 1. 暴落ストレステスト（金融危機シミュレーション）")
+        st.caption("リーマンショックやコロナショック級の暴落が起きた際、総資産と含み損益がどうなるかを試算します。")
+        
+        stress_scenarios = [-10, -20, -30, -40, -50]
+        stress_rows = []
+        for drop in stress_scenarios:
+            stressed_val = current_total_valuation * (1.0 + drop / 100.0)
+            stressed_pnl = stressed_val - current_total_cost
+            safe_4pct_monthly = (stressed_val * 0.04) / 12.0
+            stress_rows.append({
+                '暴落シナリオ': f"株価 {drop}% 下落",
+                '暴落後の総資産額': round(stressed_val),
+                '暴落後のトータル損益': round(stressed_pnl),
+                '4%ルールでの月間取崩可能額': round(safe_4pct_monthly)
+            })
+        df_stress = pd.DataFrame(stress_rows)
+        st.dataframe(
+            df_stress.style.format({
+                '暴落後の総資産額': '{:,.0f} 円',
+                '暴落後のトータル損益': '{:+,.0f} 円',
+                '4%ルールでの月間取崩可能額': '{:,.0f} 円/月'
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    with col_p2:
+        st.markdown("#### 🛡️ 2. 4%ルール（トリニティ・スタディ）生活費カバー率")
+        st.caption("現在の資産を年4%で取り崩した場合、想定生活費の何%をカバーできているかを診断します。")
+        
+        target_living = st.number_input("現在の月間生活費（円）", min_value=50000, max_value=2000000, value=250000, step=10000, key="p_living")
+        monthly_4pct = (current_total_valuation * 0.04) / 12.0
+        coverage_rate = (monthly_4pct / target_living * 100.0) if target_living > 0 else 0.0
+        
+        st.metric("現在の4%ルール安全取崩額（月額）", f"{monthly_4pct:,.0f} 円 / 月", f"年間 {current_total_valuation * 0.04:,.0f} 円")
+        st.write(f"**生活費カバー率: {coverage_rate:.1f} %** （完全FIRE達成＝100%、サイドFIRE目安＝50%）")
+        st.progress(min(coverage_rate / 100.0, 1.0))
+        
+        if coverage_rate >= 100:
+            st.success("🎉 現在の資産だけで、4%ルールによる完全FIRE（生活費100%カバー）が可能な水準です！")
+        elif coverage_rate >= 50:
+            st.info("👍 生活費の半分以上を資産所得でカバーできており、サイドFIRE射程圏内に入っています！")
+        else:
+            need_more = (target_living * 12 * 25 * 0.5) - current_total_valuation
+            st.write(f"💡 サイドFIRE目安（生活費の50%カバー）まで、あと **{max(need_more, 0):,.0f} 円** です。")
