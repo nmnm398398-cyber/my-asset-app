@@ -253,9 +253,7 @@ def is_fx_sensitive_asset(name, ticker, asset_class):
     return False
 
 def get_tax_info(asset_class, account_type):
-    """
-    日米税制完全準拠の手取り率（1 - 税率）と税区分ラベルを返す
-    """
+    """日米税制完全準拠の手取り率（1 - 税率）と税区分ラベルを返す"""
     is_us = (asset_class == '米国株・米国ETF')
     is_nisa = (account_type == 'NISA')
 
@@ -355,9 +353,7 @@ def _fetch_single_quote(symbol):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_realtime_market_indices():
-    """
-    ドル円・日経平均・S&P500・ナスダックの「現物」および「先物」と、その価額日時を並列取得する
-    """
+    """ドル円・日経平均・S&P500・ナスダックの「現物」および「先物」と、その価額日時を並列取得する"""
     targets = {
         'usdjpy': ['JPY=X'],
         'nikkei_spot': ['^N225'],
@@ -456,9 +452,7 @@ def search_jp_ticker_by_name(stock_name):
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_trust_distribution_data(fund_name, expected_nav=10000.0):
-    """
-    投資信託（ファンド）の分配金を調査する関数
-    """
+    """投資信託（ファンド）の分配金を調査する関数"""
     s = unicodedata.normalize('NFKC', str(fund_name)).strip()
 
     no_dist_keywords = [
@@ -1203,13 +1197,15 @@ current_total_man = int(round(current_total_valuation / 10000.0))
 current_annual_div_pre = float(df_master['年間配当金(税引前)'].sum()) if not df_master.empty else 0.0
 current_annual_div_post = float(df_master['年間配当金(税引後)'].sum()) if not df_master.empty else 0.0
 
-# --- タブ構成 ---
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+# --- タブ構成（全7タブ） ---
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📊 1. 総合ダッシュボード & 新NISA枠",
     "🎁 2. 配当分析(税引前/税引後) & カレンダー",
-    "📈 3. 積立シミュレーション(万円)",
-    "🏖️ 4. サイドFIRE診断 & 5段階ロードマップ",
-    "💱 5. 為替(ドル円) & リバランス・暴落分析"
+    "📈 3. 積立シミュレーション",
+    "🏖️ 4. サイドFIRE診断 & 5段階マップ",
+    "🎲 5. モンテカルロ確率診断",
+    "🏥 6. FIRE後の税金・国保・年金試算",
+    "💱 7. 為替(ドル円) & リバランス・暴落分析"
 ])
 
 # ==============================================================================
@@ -1353,7 +1349,6 @@ with tab2:
 
         basis_col = '評価額' if '現時点評価額' in asset_basis else '取得額'
 
-        # --- 検算・手動微調整エディタ ---
         with st.expander("🛠️ 【1株配当・投信分配金の検算・微調整パネル】保有数量・配当単価(円)・入金月を確認・修正する（クリックで開閉）", expanded=True):
             st.info("""
             💡 **配当・分配金の自動採用ルールと1円単位の検算について**：
@@ -2061,9 +2056,434 @@ with tab4:
     )
 
 # ==============================================================================
-# TAB 5: 為替レート（ドル円）連動シミュレーター & リバランス・暴落ストレステスト
+# TAB 5: 【新機能】モンテカルロ・シミュレーション（乱数1,000回試行による確率診断）
 # ==============================================================================
 with tab5:
+    st.subheader("🎲 モンテカルロ・シミュレーション（確率的資産推移 ＆ サイドFIRE成功確率診断）")
+    st.caption("株式市場の「毎年の価格変動リスク（ボラティリティ・暴落や好況のランダムな波）」を考慮し、数千通りの乱数シナリオから『サイドFIREの成功確率』と『将来資産の確率分布（上位10%〜下位10%）』を算出します。")
+
+    with st.container(border=True):
+        st.markdown("##### ⚙️ モンテカルロ・シミュレーション設定")
+        mc_mode = st.radio(
+            "検証するシミュレーション対象",
+            [
+                "① 🏖️ サイドFIRE計画（タブ4の積立 ➔ サイドFIRE取崩し ➔ 年金スケジュールを確率検証）",
+                "② 📈 純粋な積立投資（タブ3の毎月積立のみで向こう30年間運用した場合を確率検証）"
+            ],
+            index=0
+        )
+
+        mc_c1, mc_c2, mc_c3, mc_c4 = st.columns(4)
+        with mc_c1:
+            mc_expected_return = st.number_input(
+                "期待リターン（年率 %）",
+                min_value=0.0, max_value=25.0, value=float(fire_yield), step=0.1,
+                help="タブ4で設定した想定利回りが初期セットされています"
+            )
+        with mc_c2:
+            mc_volatility = st.number_input(
+                "想定リスク / ボラティリティ（年率標準偏差 %）",
+                min_value=1.0, max_value=40.0, value=15.0, step=0.5,
+                help="毎年のリターンの振れ幅です。オルカンやS&P500は約15〜18%、高配当株・バランス型は約10〜14%が目安です。"
+            )
+        with mc_c3:
+            mc_trials = st.selectbox("乱数シミュレーション試行回数", [500, 1000, 2000, 3000], index=1)
+        with mc_c4:
+            mc_seed = st.number_input("乱数シード値（再現性固定用）", min_value=1, max_value=9999, value=42, step=1)
+
+        st.info("""
+        💡 **【解説】ボラティリティ（年率標準偏差 %）の目安**：
+        * **全世界株式（オルカン）・S&P500（100%株式）**：過去実績のボラティリティは **【15.0% 〜 18.0%】** 程度です（約7割の年で「期待リターン ± 15%」の範囲に収まり、数年に一度 -20%〜-30% の下落が起きる水準）。
+        * **日米高配当株・連続増配株中心**：ディフェンシブ性があり **【12.0% 〜 15.0%】** 程度が目安です。
+        * **株式＋現金・債券のキャッシュクッション併用**：**【8.0% 〜 12.0%】** 程度に抑えられ、FIRE直後の暴落による資産枯渇リスク（収益率の順番リスク）を大幅に下げられます。
+        """)
+
+    # --- 高速ベクトル化モンテカルロ計算（NumPy） ---
+    rng = np.random.default_rng(int(mc_seed))
+    mu_annual = mc_expected_return / 100.0
+    sigma_annual = mc_volatility / 100.0
+    # 幾何ブラウン運動（月次ステップ）のドリフトとボラティリティ
+    dt_step = 1.0 / 12.0
+    drift_m = (mu_annual - 0.5 * (sigma_annual ** 2)) * dt_step
+    vol_m = sigma_annual * np.sqrt(dt_step)
+
+    if "①" in mc_mode:
+        mc_years = int(sim_years_total)
+        mc_init = float(fire_init_man)
+        start_d_mc = datetime(cur_year, cur_month, 1)
+        fire_d_mc = datetime(int(fire_year), int(fire_month), 1)
+        pen_d_mc = datetime(int(pension_year), int(pension_month), 1)
+        m_inf_mc = (inflation_rate / 100.0) / 12.0
+    else:
+        mc_years = 30
+        mc_init = float(sim_initial_man)
+
+    n_months_mc = mc_years * 12
+    n_sims = int(mc_trials)
+
+    # 月次ランダムリターン行列 (n_sims × n_months_mc)
+    rand_z = rng.standard_normal((n_sims, n_months_mc))
+    monthly_growth_factors = np.exp(drift_m + vol_m * rand_z)
+
+    balances = np.full(n_sims, mc_init, dtype=np.float64)
+    ever_depleted = np.zeros(n_sims, dtype=bool)
+    yearly_paths = np.zeros((n_sims, mc_years), dtype=np.float64)
+    yearly_depletion_rate = np.zeros(mc_years, dtype=np.float64)
+
+    for m in range(n_months_mc):
+        if "①" in mc_mode:
+            c_dt = start_d_mc + relativedelta(months=m)
+            is_f = c_dt >= fire_d_mc
+            is_p = c_dt >= pen_d_mc
+            adj_liv = living_cost_man * ((1.0 + m_inf_mc) ** m)
+
+            if not is_f:
+                cf = float(pre_fire_saving_man)
+            else:
+                m_since_f = (c_dt.year - fire_d_mc.year) * 12 + (c_dt.month - fire_d_mc.month)
+                act_side = True
+                if side_job_end_option == "年金受給開始まで継続" and is_p:
+                    act_side = False
+                elif side_job_end_option == "サイドFIRE後10年間のみ" and m_since_f >= 120:
+                    act_side = False
+                elif side_job_end_option == "サイドFIRE後15年間のみ" and m_since_f >= 180:
+                    act_side = False
+                c_side = float(side_income_man) if act_side else 0.0
+                c_pen = float(pension_man) if is_p else 0.0
+                cf = c_side + c_pen - adj_liv
+        else:
+            cf = float(sim_monthly_man)
+
+        # 既に枯渇したパスは0のまま維持
+        active_mask = ~ever_depleted
+        balances[active_mask] = balances[active_mask] * monthly_growth_factors[active_mask, m] + cf
+        newly_depleted = balances <= 0.0
+        ever_depleted = ever_depleted | newly_depleted
+        balances[ever_depleted] = 0.0
+
+        if (m + 1) % 12 == 0:
+            y_idx = (m + 1) // 12 - 1
+            yearly_paths[:, y_idx] = balances
+            yearly_depletion_rate[y_idx] = np.mean(ever_depleted) * 100.0
+
+    # パーセンタイル集計
+    p10 = np.percentile(yearly_paths, 10, axis=0)
+    p25 = np.percentile(yearly_paths, 25, axis=0)
+    p50 = np.percentile(yearly_paths, 50, axis=0)
+    p75 = np.percentile(yearly_paths, 75, axis=0)
+    p90 = np.percentile(yearly_paths, 90, axis=0)
+
+    success_rate = 100.0 - yearly_depletion_rate[-1]
+
+    st.markdown("---")
+    st.markdown(f"#### 🎯 モンテカルロ診断結果（試行回数：{n_sims:,}回 / {mc_years}年後時点）")
+
+    if "①" in mc_mode:
+        if success_rate >= 85.0:
+            st.success(f"🎉 **【サイドFIRE成功確率：{success_rate:.1f}%（極めて安全）】** 暴落や市場の乱高下を考慮した{n_sims:,}回のシミュレーションでも、85%以上の高い確率で資産が枯渇せず維持できます！")
+        elif success_rate >= 70.0:
+            st.info(f"✅ **【サイドFIRE成功確率：{success_rate:.1f}%（概ね良好）】** 7割以上のシナリオで資産を維持できます。暴落時に副業収入を少し増やすか生活費を抑える柔軟性があれば十分実現可能です。")
+        else:
+            st.warning(f"⚠️ **【サイドFIRE成功確率：{success_rate:.1f}%（要注意：枯渇確率 {100-success_rate:.1f}%）】** FIRE直後に大暴落が来た場合などに資金が枯渇するリスクが高めです。初期資産を増やすか、取崩し額を抑えることを推奨します。")
+
+    mk1, mk2, mk3, mk4, mk5 = st.columns(5)
+    mk1.metric(f"{mc_years}年後の成功確率(枯渇ゼロ)", f"{success_rate:.1f} %", f"枯渇確率 {100.0 - success_rate:.1f} %")
+    mk2.metric("上位10%（好調シナリオ）", fmt_man(p90[-1]), "90パーセンタイル")
+    mk3.metric("中央値（標準シナリオ）", fmt_man(p50[-1]), "50パーセンタイル")
+    mk4.metric("下位25%（やや不調）", fmt_man(p25[-1]), "25パーセンタイル")
+    mk5.metric("下位10%（悲観・暴落シナリオ）", fmt_man(p10[-1]), "10パーセンタイル")
+
+    # ファンチャート（帯グラフ）作成
+    years_axis = [cur_year + y for y in range(1, mc_years + 1)]
+    fig_mc = go.Figure()
+
+    # 10%〜90% 帯
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p90), mode='lines', line=dict(width=0),
+        showlegend=False, hoverinfo='skip'
+    ))
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p10), mode='lines', line=dict(width=0),
+        fill='tonexty', fillcolor='rgba(16, 185, 129, 0.15)',
+        name='10%〜90% 確率帯（8割が収まる範囲）', hoverinfo='skip'
+    ))
+
+    # 25%〜75% 帯
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p75), mode='lines', line=dict(width=0),
+        showlegend=False, hoverinfo='skip'
+    ))
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p25), mode='lines', line=dict(width=0),
+        fill='tonexty', fillcolor='rgba(16, 185, 129, 0.35)',
+        name='25%〜75% 確率帯（中心5割の範囲）', hoverinfo='skip'
+    ))
+
+    # 各パーセンタイル線
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p90), mode='lines',
+        name='上位10%（好調）', line=dict(color='#059669', width=1.5, dash='dot'),
+        customdata=[fmt_man(v) for v in p90], hovertemplate='%{customdata}<extra>上位10%</extra>'
+    ))
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p50), mode='lines+markers',
+        name='中央値（50%標準）', line=dict(color='#047857', width=3.5),
+        customdata=[fmt_man(v) for v in p50], hovertemplate='%{customdata}<extra>中央値(50%)</extra>'
+    ))
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p25), mode='lines',
+        name='下位25%（やや不調）', line=dict(color='#d97706', width=2, dash='dash'),
+        customdata=[fmt_man(v) for v in p25], hovertemplate='%{customdata}<extra>下位25%</extra>'
+    ))
+    fig_mc.add_trace(go.Scatter(
+        x=years_axis, y=np.round(p10), mode='lines',
+        name='下位10%（悲観・暴落）', line=dict(color='#dc2626', width=2, dash='dash'),
+        customdata=[fmt_man(v) for v in p10], hovertemplate='%{customdata}<extra>下位10%</extra>'
+    ))
+
+    if "①" in mc_mode:
+        fig_mc.add_vline(x=int(fire_year), line_dash="dash", line_color="orange", annotation_text="サイドFIRE開始", annotation_position="top left")
+        if pension_year <= cur_year + mc_years:
+            fig_mc.add_vline(x=int(pension_year), line_dash="dash", line_color="blue", annotation_text="年金開始", annotation_position="top left")
+
+    fig_mc.update_layout(
+        title=f"モンテカルロ・シミュレーション 資産推移ファンチャート（{n_sims:,}回試行）",
+        xaxis_title="西暦（年）",
+        yaxis_title="資産残高（万円）",
+        xaxis=dict(tickformat="d", ticksuffix="年"),
+        yaxis=dict(tickformat=",d", ticksuffix="万円"),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    st.plotly_chart(fig_mc, use_container_width=True)
+
+    st.markdown("##### 📋 年次別 パーセンタイル資産推移 ＆ 枯渇確率 一覧表（5桁万円は『〇億〇万円』表記）")
+    mc_table_rows = []
+    for y_i in range(mc_years):
+        mc_table_rows.append({
+            '経過年数': f"{y_i + 1}年目",
+            '西暦': f"{years_axis[y_i]}年",
+            '下位10%(悲観)': fmt_man(p10[y_i]),
+            '下位25%(やや不調)': fmt_man(p25[y_i]),
+            '中央値(標準50%)': fmt_man(p50[y_i]),
+            '上位25%(やや好調)': fmt_man(p75[y_i]),
+            '上位10%(好調)': fmt_man(p90[y_i]),
+            '資産維持率(成功確率)': f"{100.0 - yearly_depletion_rate[y_i]:.1f} %",
+            '累積枯渇確率': f"{yearly_depletion_rate[y_i]:.1f} %"
+        })
+    st.dataframe(pd.DataFrame(mc_table_rows), use_container_width=True, hide_index=True)
+
+# ==============================================================================
+# TAB 6: 【新機能・提案⑤】サイドFIRE後の「税金・社会保険料（国保・年金）＆確定申告」リアル試算
+# ==============================================================================
+with tab6:
+    st.subheader("🏥 サイドFIRE後の「税金・社会保険料（国保・年金）＆確定申告」リアル手取り試算")
+    st.caption("会社員を退職してサイドFIREした後に発生する「国民健康保険料」「国民年金」「所得税・住民税」を精緻に試算し、特定口座の配当金を確定申告すべきか（国保トラップ判定）まで診断します。")
+
+    # ポートフォリオからNISA配当と特定口座配当（国内/米国）を自動集計
+    if not df_master.empty:
+        nisa_div_auto_man = round(float(df_master.loc[df_master['口座区分'] == 'NISA', '年間配当金(税引後)'].sum()) / 10000.0, 1)
+        tokutei_jp_mask = (df_master['口座区分'] != 'NISA') & (df_master['資産クラス'] != '米国株・米国ETF')
+        tokutei_us_mask = (df_master['口座区分'] != 'NISA') & (df_master['資産クラス'] == '米国株・米国ETF')
+        tokutei_jp_div_pre_man = round(float(df_master.loc[tokutei_jp_mask, '年間配当金(税引前)'].sum()) / 10000.0, 1)
+        tokutei_us_div_after_us_man = round(float(df_master.loc[tokutei_us_mask, '年間配当金(税引前)'].sum()) * 0.90 / 10000.0, 1)
+    else:
+        nisa_div_auto_man = 15.0
+        tokutei_jp_div_pre_man = 20.0
+        tokutei_us_div_after_us_man = 10.0
+
+    with st.container(border=True):
+        st.markdown("##### ⚙️ サイドFIRE後の世帯・収入・控除条件の入力（単位：万円/年）")
+        tx_c1, tx_c2, tx_c3 = st.columns(3)
+
+        with tx_c1:
+            st.markdown("**① 副業収入（事業所得 / 給与）**")
+            side_style = st.radio("副業の形態", ["個人事業主・フリーランス（青色申告）", "アルバイト・パート（給与所得）"], index=0)
+            if "個人事業主" in side_style:
+                gross_side_man = st.number_input("副業の年間売上（万円/年）", min_value=0.0, max_value=5000.0, value=float(side_income_man * 12 + 40), step=10.0)
+                exp_side_man = st.number_input("年間の必要経費（通信費・PC・家事按分等 / 万円）", min_value=0.0, max_value=3000.0, value=40.0, step=5.0)
+                blue_ded_man = st.selectbox("青色申告特別控除（万円）", [65.0, 55.0, 10.0, 0.0], index=0, help="e-Taxによる複式簿記なら65万円控除が適用されます")
+                net_side_cash_man = max(gross_side_man - exp_side_man, 0.0)
+                side_taxable_income_man = max(net_side_cash_man - blue_ded_man, 0.0)
+            else:
+                gross_side_man = st.number_input("パート・アルバイト年間額面給与（万円/年）", min_value=0.0, max_value=2000.0, value=float(side_income_man * 12), step=10.0)
+                net_side_cash_man = gross_side_man
+                # 給与所得控除（最低55万円）
+                if gross_side_man <= 162.5:
+                    sal_ded = 55.0
+                elif gross_side_man <= 180.0:
+                    sal_ded = gross_side_man * 0.4 - 10.0
+                elif gross_side_man <= 360.0:
+                    sal_ded = gross_side_man * 0.3 + 8.0
+                else:
+                    sal_ded = gross_side_man * 0.2 + 44.0
+                side_taxable_income_man = max(gross_side_man - sal_ded, 0.0)
+
+        with tx_c2:
+            st.markdown("**② 配当金・株式売却益（自動連動）**")
+            nisa_div_man = st.number_input("NISA口座 年間配当金（手取り・万円/年）", min_value=0.0, max_value=2000.0, value=float(nisa_div_auto_man), step=1.0, help="NISAの配当は完全非課税で、国保料にも一切影響しません")
+            tok_jp_div_man = st.number_input("特定口座【日本株/投信】年間配当（税引前・万円/年）", min_value=0.0, max_value=2000.0, value=float(tokutei_jp_div_pre_man), step=1.0, help="総合課税で配当控除の対象になる国内配当です")
+            tok_us_div_man = st.number_input("特定口座【米国株】年間配当（米税10%控除後・万円/年）", min_value=0.0, max_value=2000.0, value=float(tokutei_us_div_after_us_man), step=1.0)
+            tok_cap_gain_man = st.number_input("特定口座 年間株式売却益（利益部分・万円/年）", min_value=0.0, max_value=2000.0, value=0.0, step=5.0, help="4%ルール等で特定口座の投資信託・株を売却した際の『含み益（課税対象）』部分です")
+
+        with tx_c3:
+            st.markdown("**③ 年齢・家族構成・年金・所得控除**")
+            age_group = st.selectbox("年齢区分（国保の介護保険料判定）", ["40歳未満（介護分なし）", "40歳〜64歳（介護第2号被保険者）", "65歳以上"], index=1)
+            household_members = st.number_input("国保の加入世帯人数（均等割の人数）", min_value=1, max_value=8, value=1, step=1)
+            nenkin_status = st.selectbox(
+                "国民年金の納付状況（1人あたり約21万円/年）",
+                ["1人分 全額納付（単身 / 配偶者別）", "夫婦2人分 全額納付（約42万円/年）", "半額免除申請", "全額免除 / マイクロ法人社保"],
+                index=0
+            )
+            other_ded_man = st.number_input("iDeCo・小規模企業共済・生命保険等の控除合計（万円/年）", min_value=0.0, max_value=500.0, value=27.6, step=1.0, help="例：iDeCo月2.3万円なら年27.6万円が全額所得控除になります")
+
+    # --- 税金・国民健康保険料・国民年金の厳密計算関数 ---
+    if "1人分" in nenkin_status:
+        nenkin_pay_man = 21.0
+    elif "夫婦2人分" in nenkin_status:
+        nenkin_pay_man = 42.0
+    elif "半額免除" in nenkin_status:
+        nenkin_pay_man = 10.5
+    else:
+        nenkin_pay_man = 0.0
+
+    def calc_nhi_premium_man(total_income_for_nhi_man, members_cnt, age_grp_str):
+        """
+        国民健康保険料（年間・万円）の全国標準モデル試算（令和6〜8年度基準）
+        - 基礎賦課額（医療分）＋ 後期高齢者支援金分 ＋ 介護納付金分（40〜64歳）
+        - 低所得世帯の7割・5割・2割軽減（均等割・平等割の軽減）も自動判定！
+        """
+        # 賦課基準額 ＝ 総所得金額等 － 基礎控除43万円
+        kijun_man = max(total_income_for_nhi_man - 43.0, 0.0)
+        has_kaigo = ("40歳〜64歳" in age_grp_str)
+
+        # 所得割率（全国平均目安：医療+支援 約9.5%、介護分 約2.0%）
+        rate_shotoku = 0.115 if has_kaigo else 0.095
+        shotoku_wari = kijun_man * rate_shotoku
+
+        # 均等割＋平等割（1人あたり均等割 約5.0万円［介護込6.6万円］＋世帯平等割 約3.0万円）
+        kinto_per_person = 6.6 if has_kaigo else 5.0
+        byodo_per_household = 3.0
+        base_fixed = kinto_per_person * members_cnt + byodo_per_household
+
+        # 法定軽減判定（7割・5割・2割軽減：基礎控除43万円を引く前の総所得で判定）
+        if total_income_for_nhi_man <= 43.0 + 10.0 * (members_cnt - 1):
+            discount_factor = 0.30  # 7割軽減
+            discount_label = "7割軽減適用"
+        elif total_income_for_nhi_man <= 43.0 + 29.5 * members_cnt + 10.0:
+            discount_factor = 0.50  # 5割軽減
+            discount_label = "5割軽減適用"
+        elif total_income_for_nhi_man <= 43.0 + 54.5 * members_cnt + 10.0:
+            discount_factor = 0.80  # 2割軽減
+            discount_label = "2割軽減適用"
+        else:
+            discount_factor = 1.00
+            discount_label = "軽減なし(通常)"
+
+        total_nhi = shotoku_wari + (base_fixed * discount_factor)
+        max_cap = 106.0 if has_kaigo else 89.0  # 賦課限度額
+        return round(min(total_nhi, max_cap), 1), discount_label
+
+    def calc_income_and_resident_tax(base_income_man, social_ins_man, other_d_man, comprehensive_div_man=0.0):
+        """所得税（復興税込）と住民税（所得割＋均等割）を計算する"""
+        total_inc = base_income_man + comprehensive_div_man
+        total_ded_it = 48.0 + social_ins_man + other_d_man  # 所得税基礎控除48万
+        total_ded_rt = 43.0 + social_ins_man + other_d_man  # 住民税基礎控除43万
+
+        taxable_it = max(total_inc - total_ded_it, 0.0)
+        taxable_rt = max(total_inc - total_ded_rt, 0.0)
+
+        # 所得税の速算表
+        if taxable_it <= 195.0:
+            it_raw = taxable_it * 0.05
+        elif taxable_it <= 330.0:
+            it_raw = taxable_it * 0.10 - 9.75
+        elif taxable_it <= 695.0:
+            it_raw = taxable_it * 0.20 - 42.75
+        elif taxable_it <= 900.0:
+            it_raw = taxable_it * 0.23 - 63.6
+        else:
+            it_raw = taxable_it * 0.33 - 153.6
+
+        # 総合課税選択時の配当控除（課税総所得1,000万円以下：所得税10%、住民税2.8%）
+        div_credit_it = comprehensive_div_man * 0.10 if comprehensive_div_man > 0 else 0.0
+        div_credit_rt = comprehensive_div_man * 0.028 if comprehensive_div_man > 0 else 0.0
+
+        final_it = max(it_raw - div_credit_it, 0.0) * 1.021  # 復興特別所得税
+        final_rt = max(taxable_rt * 0.10 - div_credit_rt, 0.0) + (0.5 if total_inc > 45.0 else 0.0)
+        return round(final_it, 2), round(final_rt, 2)
+
+    # --- パターンA：特定口座を「申告不要（源泉徴収のまま）」にした場合 ---
+    nhi_a_man, nhi_a_lbl = calc_nhi_premium_man(side_taxable_income_man, household_members, age_group)
+    soc_a_man = nhi_a_man + nenkin_pay_man
+    it_a_man, rt_a_man = calc_income_and_resident_tax(side_taxable_income_man, soc_a_man, other_ded_man, 0.0)
+    withheld_tax_a_man = round((tok_jp_div_man + tok_us_div_man + tok_cap_gain_man) * 0.20315, 2)
+    total_burden_a_man = round(nhi_a_man + nenkin_pay_man + it_a_man + rt_a_man + withheld_tax_a_man, 1)
+
+    # --- パターンB：日本株配当を「総合課税で確定申告（配当控除適用）」した場合 ---
+    # 総合課税にすると、特定口座の配当が国保の算定所得に合算される（国保トラップ）
+    nhi_b_man, nhi_b_lbl = calc_nhi_premium_man(side_taxable_income_man + tok_jp_div_man, household_members, age_group)
+    soc_b_man = nhi_b_man + nenkin_pay_man
+    it_b_man, rt_b_man = calc_income_and_resident_tax(side_taxable_income_man, soc_b_man, other_ded_man, tok_jp_div_man)
+    withheld_other_b_man = round((tok_us_div_man + tok_cap_gain_man) * 0.20315, 2)
+    total_burden_b_man = round(nhi_b_man + nenkin_pay_man + it_b_man + rt_b_man + withheld_other_b_man, 1)
+
+    # 収入合計（手元に入るキャッシュ総額・税引前ベース）
+    total_gross_cash_man = net_side_cash_man + nisa_div_man + tok_jp_div_man + tok_us_div_man + tok_cap_gain_man
+    net_takehome_a_man = round(total_gross_cash_man - total_burden_a_man, 1)
+    net_takehome_b_man = round(total_gross_cash_man - total_burden_b_man, 1)
+
+    best_takehome_man = max(net_takehome_a_man, net_takehome_b_man)
+    annual_living_man = float(living_cost_man * 12)
+    annual_surplus_man = round(best_takehome_man - annual_living_man, 1)
+
+    st.markdown("---")
+    st.markdown("#### 📊 サイドFIRE後の「真の手取り額」＆ 確定申告（国保トラップ）判定")
+
+    if net_takehome_a_man >= net_takehome_b_man:
+        diff_ab = round(net_takehome_a_man - net_takehome_b_man, 1)
+        st.success(f"💡 **【最適申告判定：① 申告不要（特定口座・源泉徴収のまま）が年間 約{diff_ab:,.1f}万円 お得！】** 総合課税で確定申告すると税金は安くなりますが、国民健康保険料が **{nhi_a_man:.1f}万円 ➔ {nhi_b_man:.1f}万円** に増える（国保トラップ）ため、**確定申告せず源泉徴収で完結させる方が手取りが多く残ります。**")
+    else:
+        diff_ba = round(net_takehome_b_man - net_takehome_a_man, 1)
+        st.info(f"💡 **【最適申告判定：② 総合課税で確定申告（配当控除）が年間 約{diff_ba:,.1f}万円 お得！】** 国保料の増加分（+{nhi_b_man - nhi_a_man:.1f}万円）よりも、配当控除による税金の還付メリットの方が上回るため、総合課税での確定申告が有利です。")
+
+    tk1, tk2, tk3, tk4 = st.columns(4)
+    tk1.metric("年間 総収入（経費控除後・税引前）", f"{total_gross_cash_man:,.1f} 万円/年", f"月額換算 {total_gross_cash_man/12:,.1f} 万円/月")
+    tk2.metric("税金＋国保＋年金 負担合計（最小）", f"{min(total_burden_a_man, total_burden_b_man):,.1f} 万円/年", f"負担率 {(min(total_burden_a_man, total_burden_b_man)/max(total_gross_cash_man, 1)*100):.1f} %")
+    tk3.metric("サイドFIRE後の「真の手取り年額」", f"{best_takehome_man:,.1f} 万円/年", f"真の手取り月額 {best_takehome_man/12:,.1f} 万円/月")
+    tk4.metric(
+        f"年間生活費({annual_living_man:,.0f}万)差引後",
+        f"{annual_surplus_man:+,.1f} 万円/年",
+        "黒字（元本取崩し不要🎉）" if annual_surplus_man >= 0 else f"毎月 約{abs(annual_surplus_man)/12:,.1f}万円を資産から取崩し"
+    )
+
+    st.markdown("##### 📋 申告方式別「税金・国民健康保険料・手取り額」徹底比較表（単位：万円/年）")
+    comp_df = pd.DataFrame([
+        {
+            '比較項目': '① 申告不要制度（特定口座・源泉徴収のまま）',
+            '国民健康保険料': f"{nhi_a_man:,.1f} 万円 ({nhi_a_lbl})",
+            '国民年金保険料': f"{nenkin_pay_man:,.1f} 万円",
+            '所得税＋住民税(副業分)': f"{it_a_man + rt_a_man:,.1f} 万円",
+            '特定口座 源泉徴収税(20.3%)': f"{withheld_tax_a_man:,.1f} 万円",
+            '税・社保 年間負担合計': f"{total_burden_a_man:,.1f} 万円",
+            '真の手取り額（年額 / 月額）': f"{net_takehome_a_man:,.1f} 万円/年 （月 {net_takehome_a_man/12:,.1f} 万円）"
+        },
+        {
+            '比較項目': '② 総合課税で確定申告（配当控除を活用）',
+            '国民健康保険料': f"{nhi_b_man:,.1f} 万円 ({nhi_b_lbl})",
+            '国民年金保険料': f"{nenkin_pay_man:,.1f} 万円",
+            '所得税＋住民税(配当控除反映後)': f"{it_b_man + rt_b_man:,.1f} 万円",
+            '特定口座 源泉徴収税(米株・譲渡分)': f"{withheld_other_b_man:,.1f} 万円",
+            '税・社保 年間負担合計': f"{total_burden_b_man:,.1f} 万円",
+            '真の手取り額（年額 / 月額）': f"{net_takehome_b_man:,.1f} 万円/年 （月 {net_takehome_b_man/12:,.1f} 万円）"
+        }
+    ])
+    st.table(comp_df)
+
+# ==============================================================================
+# TAB 7: 為替レート（ドル円）連動シミュレーター & リバランス・暴落ストレステスト
+# ==============================================================================
+with tab7:
     st.subheader("💱 為替レート（ドル円）連動シミュレーター & リバランス・暴落分析")
 
     with st.container(border=True):
