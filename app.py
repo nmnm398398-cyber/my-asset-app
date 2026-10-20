@@ -11,7 +11,6 @@ import urllib.request
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone, timedelta
-from dateutil.relativedelta import relativedelta
 
 # 日本時間 (JST) タイムゾーン定義
 JST = timezone(timedelta(hours=9))
@@ -19,7 +18,7 @@ JST = timezone(timedelta(hours=9))
 # --- ページ設定 ---
 st.set_page_config(page_title="資産管理 & サイドFIRE統合シミュレーター", layout="wide")
 
-# --- 「…」による文字切れ（見出し・数値・デルタすべて）を完全に防ぐカスタムCSS ---
+# --- カスタムCSS（文字切れ防止 & タブ風ナビゲーションデザイン） ---
 st.markdown("""
 <style>
 [data-testid="stMetricLabel"],
@@ -49,6 +48,14 @@ st.markdown("""
     margin-top: -10px;
     margin-bottom: 10px;
 }
+/* 上部水平ラジオボタンをタブバー風にスタイリング */
+div[role="radiogroup"][aria-orientation="horizontal"] {
+    background-color: #f1f5f9;
+    padding: 6px 10px;
+    border-radius: 10px;
+    gap: 8px;
+    margin-bottom: 12px;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -59,15 +66,15 @@ st.title("💎 資産管理 & サイドFIRE 統合シミュレーター")
 # ==============================================================================
 FALLBACK_STOCK_DIV_MASTER = {
     '8058': (100.0, '今期予想'),   # 三菱商事
-    '8316': (120.0, '今期予想'),   # 三井住友FG (3分割後基準)
+    '8316': (120.0, '今期予想'),   # 三井住友FG
     '8306': (60.0,  '今期予想'),   # 三菱UFJ
     '8411': (130.0, '今期予想'),   # みずほFG
     '2914': (194.0, '今期予想'),   # JT
     '8001': (200.0, '今期予想'),   # 伊藤忠商事
-    '8031': (100.0, '今期予想'),   # 三井物産 (2分割後基準)
+    '8031': (100.0, '今期予想'),   # 三井物産
     '9432': (5.2,   '今期予想'),   # NTT
-    '9433': (75.0,  '今期予想'),   # KDDI (2分割後基準)
-    '9434': (8.6,   '今期予想'),   # ソフトバンク (10分割後基準)
+    '9433': (75.0,  '今期予想'),   # KDDI
+    '9434': (8.6,   '今期予想'),   # ソフトバンク
     '8766': (162.0, '今期予想'),   # 東京海上HD
     '8591': (120.0, '今期予想'),   # オリックス
     '7203': (90.0,  '今期予想'),   # トヨタ自動車
@@ -102,7 +109,7 @@ FALLBACK_TRUST_DIV_MASTER = [
 ]
 
 # ==============================================================================
-# 2. ユーティリティ & 金額フォーマット関数（5桁万円 ➔ 〇億〇万円 自動変換対応）
+# 2. ユーティリティ & 金額フォーマット関数（5桁万円 ➔ 〇億〇万円 自動変換）
 # ==============================================================================
 
 def clean_num(val):
@@ -128,8 +135,8 @@ def clean_num(val):
 def fmt_man(man_val, signed=False):
     """
     「万円」単位の数値をフォーマットする関数
-    - 5桁万円以上（10,000万円＝1億円以上）の場合：『〇億〇万円』表記にする
-    - 4桁万円以下の場合：『〇万円』（整数）表記にする
+    - 10,000万円（1億円）以上の場合：『〇億〇万円』表記
+    - 10,000万円未満の場合：『〇万円』（整数）表記
     """
     if pd.isna(man_val):
         return "0 万円"
@@ -151,11 +158,7 @@ def fmt_man(man_val, signed=False):
 
 def fmt_man_or_sen(yen_val, signed=False):
     """
-    「円」単位の数値を直感的な日本語表記に変換する（「100k」表記は一切使わない）
-    - 1億円（10,000万円＝5桁万円）以上：『〇億〇万円』
-    - 1万円以上〜1億円未満：『〇万円』（小数点なし整数）
-    - 1,000円以上〜1万円未満：『〇.〇千円』
-    - 1,000円未満：『〇円』
+    「円」単位の数値を直感的な日本語表記に変換する
     """
     if pd.isna(yen_val):
         return "0 円"
@@ -411,7 +414,7 @@ def parse_pay_months_str(months_str):
     return sorted(list({int(m) for m in nums if 1 <= int(m) <= 12}))
 
 # ==============================================================================
-# 4. 【核心】今期予想優先 ➔ 直近実績フォールバック（個別株・ETF・投資信託 完全対応）
+# 4. 今期予想優先 ➔ 直近実績フォールバック（個別株・ETF・投資信託 完全対応）
 # ==============================================================================
 
 def _find_in_json(obj, target_key):
@@ -1084,8 +1087,33 @@ def detect_and_parse_csv(uploaded_file):
     return pd.DataFrame(records)
 
 # ==============================================================================
-# 6. サイドバー：一括ドラッグ＆ドロップ & リアルタイム市場データ（価額の日時明記）
+# 6. ナビゲーションメニュー設定 & サイドバー構成
 # ==============================================================================
+
+MENU_OPTIONS = [
+    "1. My資産",
+    "2. 配当分析",
+    "3. 積立シミュ",
+    "4. サイドFIRE診断",
+    "5. モンテカルロ診断",
+    "6. FIRE後の試算",
+    "7. 暴落分析"
+]
+
+if "active_menu" not in st.session_state:
+    st.session_state["active_menu"] = MENU_OPTIONS[0]
+if "nav_top" not in st.session_state:
+    st.session_state["nav_top"] = MENU_OPTIONS[0]
+if "nav_side" not in st.session_state:
+    st.session_state["nav_side"] = MENU_OPTIONS[0]
+
+def _on_change_top_nav():
+    st.session_state["active_menu"] = st.session_state["nav_top"]
+    st.session_state["nav_side"] = st.session_state["nav_top"]
+
+def _on_change_side_nav():
+    st.session_state["active_menu"] = st.session_state["nav_side"]
+    st.session_state["nav_top"] = st.session_state["nav_side"]
 
 market_data = fetch_realtime_market_indices()
 current_usdjpy = float(market_data['usdjpy']['price'] or 150.0)
@@ -1106,6 +1134,16 @@ def _render_sidebar_metric(container, label, m_item, unit="", decimals=0):
         container.markdown(f"<div class='mkt-time-caption'>🕒 {t_str} 時点</div>", unsafe_allow_html=True)
 
 with st.sidebar:
+    st.header("🧭 メニュー選択")
+    st.radio(
+        "画面切り替え",
+        options=MENU_OPTIONS,
+        key="nav_side",
+        on_change=_on_change_side_nav,
+        label_visibility="collapsed"
+    )
+
+    st.markdown("---")
     st.header("📂 1. CSV一括ドラッグ＆ドロップ")
     st.caption("楽天証券・SBI証券・保存済みCSVを区別せず、ここにまとめて一気にドロップできます（自動判別）")
     uploaded_files = st.file_uploader(
@@ -1141,11 +1179,8 @@ with st.sidebar:
             del st.session_state["portfolio_df"]
         st.rerun()
 
-    st.markdown("---")
-    use_demo = st.checkbox("🧪 デモデータで試す（CSVなしで確認）", value=False)
-
 # --- データの読み込みと最新1株配当(DPS)・投信分配金の自動付与 ---
-file_sig = "|".join(sorted([f"{f.name}_{f.size}" for f in uploaded_files])) if uploaded_files else ("DEMO" if use_demo else "EMPTY")
+file_sig = "|".join(sorted([f"{f.name}_{f.size}" for f in uploaded_files])) if uploaded_files else "EMPTY"
 
 if st.session_state.get("last_file_sig") != file_sig:
     df_list = []
@@ -1156,19 +1191,6 @@ if st.session_state.get("last_file_sig") != file_sig:
                 df_list.append(parsed)
             else:
                 st.sidebar.warning(f"「{f.name}」から有効な保有明細を検出できませんでした。")
-
-    elif use_demo:
-        demo_data = [
-            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND', '銘柄名': 'eMAXIS Slim 全世界株式(オール・カントリー)', '保有数量': 1800000, '評価額': 4500000, '取得額': 3200000, '評価損益': 1300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND', '銘柄名': 'SBI日本高配当株式（分配）ファンド（年4回決算型）', '保有数量': 1500000, '評価額': 1800000, '取得額': 1500000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-            {'証券会社': 'SBI証券', '口座区分': 'NISA', '資産クラス': '米国株・米国ETF', '銘柄コード': 'VYM', '銘柄名': 'バンガード・米国高配当株式ETF (VYM)', '保有数量': 150, '評価額': 2800000, '取得額': 2100000, '評価損益': 700000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-            {'証券会社': 'SBI証券', '口座区分': '特定', '資産クラス': '日本株・東証ETF', '銘柄コード': '8058', '銘柄名': '三菱商事 (8058)', '保有数量': 600, '評価額': 1800000, '取得額': 1200000, '評価損益': 600000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-            {'証券会社': 'SBI証券', '口座区分': '特定', '資産クラス': '日本株・東証ETF', '銘柄コード': '8316', '銘柄名': '三井住友フィナンシャルG (8316)', '保有数量': 400, '評価額': 1500000, '取得額': 950000, '評価損益': 550000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-            {'証券会社': '楽天証券', '口座区分': 'NISA', '資産クラス': '投資信託', '銘柄コード': 'FUND', '銘柄名': '楽天・全米株式インデックス・ファンド', '保有数量': 1200000, '評価額': 3200000, '取得額': 2400000, '評価損益': 800000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-            {'証券会社': '楽天証券', '口座区分': '特定', '資産クラス': '米国株・米国ETF', '銘柄コード': 'SPYD', '銘柄名': 'SPDR ポートフォリオS&P 500高配当株式ETF (SPYD)', '保有数量': 340, '評価額': 2200000, '取得額': 1900000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-            {'証券会社': '楽天証券', '口座区分': '一般', '資産クラス': '日本株・東証ETF', '銘柄コード': '2914', '銘柄名': '日本たばこ産業 (2914)', '保有数量': 300, '評価額': 1200000, '取得額': 900000, '評価損益': 300000, '1株配当(円)': 0.0, '配当利回り(%)': 0.0, '採用基準': '', '配当入金月': '', '配当ソース': ''},
-        ]
-        df_list.append(pd.DataFrame(demo_data))
 
     if df_list:
         raw_master = pd.concat(df_list, ignore_index=True)
@@ -1197,23 +1219,125 @@ current_total_man = int(round(current_total_valuation / 10000.0))
 current_annual_div_pre = float(df_master['年間配当金(税引前)'].sum()) if not df_master.empty else 0.0
 current_annual_div_post = float(df_master['年間配当金(税引後)'].sum()) if not df_master.empty else 0.0
 
-# --- タブ構成（全7タブ） ---
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📊 1. 総合ダッシュボード & 新NISA枠",
-    "🎁 2. 配当分析(税引前/税引後) & カレンダー",
-    "📈 3. 積立シミュレーション",
-    "🏖️ 4. サイドFIRE診断 & 5段階マップ",
-    "🎲 5. モンテカルロ確率診断",
-    "🏥 6. FIRE後の税金・国保・年金試算",
-    "💱 7. 為替(ドル円) & リバランス・暴落分析"
-])
+# 画面間で共有するシミュレーション初期値のセッション管理
+cur_year = datetime.now(JST).year
+if "shared_sim_initial_man" not in st.session_state or st.session_state.get("last_asset_man") != current_total_man:
+    st.session_state["shared_sim_initial_man"] = current_total_man
+    st.session_state["shared_fire_init_man"] = current_total_man
+    st.session_state["last_asset_man"] = current_total_man
+
+default_shared = {
+    "shared_sim_monthly_man": 10,
+    "shared_sim_rate": 5.0,
+    "shared_fire_yield": 5.0,
+    "shared_pre_fire_saving_man": 10,
+    "shared_inflation_rate": 1.0,
+    "shared_fire_year": cur_year + 5,
+    "shared_pension_year": cur_year + 20,
+    "shared_sim_years_total": 40,
+    "shared_living_cost_man": 25,
+    "shared_side_income_man": 10,
+    "shared_side_job_end_option": "年金受給開始まで継続",
+    "shared_pension_man": 15,
+}
+for k_def, v_def in default_shared.items():
+    if k_def not in st.session_state:
+        st.session_state[k_def] = v_def
+
+# --- 画面上部メニューバー（サイドバーと完全同期） ---
+st.radio(
+    "メインメニュー",
+    options=MENU_OPTIONS,
+    horizontal=True,
+    key="nav_top",
+    on_change=_on_change_top_nav,
+    label_visibility="collapsed"
+)
+
+active_page = st.session_state["active_menu"]
 
 # ==============================================================================
-# TAB 1: 総合ダッシュボード & 新NISA 1,800万円枠トラッカー
+# サイドFIRE 年次シミュレーション共通関数（月を考慮せず「年」単位で設計）
 # ==============================================================================
-with tab1:
+def run_fire_simulation_yearly(init_man, y_rate, save_man, inf_rate, f_year, p_year, years_len, liv_man, side_man, side_opt, pen_man):
+    m_ret = (y_rate / 100.0) / 12.0
+    m_inf = (inf_rate / 100.0) / 12.0
+
+    bal = float(init_man)
+    at_fire = float(init_man) if f_year <= cur_year else None
+    dep_year = None
+    records = []
+
+    for y_idx in range(1, years_len + 1):
+        cal_y = cur_year + y_idx
+        is_f = (cal_y >= f_year)
+        is_p = (cal_y >= p_year)
+
+        if is_f and at_fire is None:
+            at_fire = bal
+
+        y_save = y_side = y_pen = y_liv = y_gain = 0.0
+
+        for m_in_y in range(12):
+            total_m = (y_idx - 1) * 12 + m_in_y
+            adj_liv = liv_man * ((1.0 + m_inf) ** total_m)
+
+            if not is_f:
+                gain = bal * m_ret
+                bal = bal + gain + save_man
+                y_save += save_man
+                y_gain += gain
+            else:
+                years_since_f = cal_y - f_year
+                act_side = True
+                if side_opt == "年金受給開始まで継続" and is_p:
+                    act_side = False
+                elif side_opt == "サイドFIRE後10年間のみ" and years_since_f >= 10:
+                    act_side = False
+                elif side_opt == "サイドFIRE後15年間のみ" and years_since_f >= 15:
+                    act_side = False
+
+                c_side = side_man if act_side else 0.0
+                c_pen = pen_man if is_p else 0.0
+                net_cf = c_side + c_pen - adj_liv
+                gain = bal * m_ret if bal > 0 else 0.0
+                bal = bal + gain + net_cf
+
+                if bal <= 0 and dep_year is None:
+                    dep_year = cal_y
+
+                y_side += c_side
+                y_pen += c_pen
+                y_liv += adj_liv
+                y_gain += gain
+
+        st_str = "積立期" if not is_f else ("年金＋サイドFIRE" if is_p else "サイドFIRE期")
+        end_b = int(round(max(bal, 0.0)))
+        records.append({
+            '西暦_数値': cal_y,
+            '経過年数': f"{y_idx}年目",
+            '西暦': f"{cal_y}年",
+            'ステータス': st_str,
+            '年間積立額(万円)': int(round(y_save)),
+            '年間副業収入(万円)': int(round(y_side)),
+            '年間年金収入(万円)': int(round(y_pen)),
+            '年間生活費(万円)': int(round(y_liv)),
+            '年間運用益(万円)': int(round(y_gain)),
+            '年間資産増減(万円)': int(round(y_save + y_side + y_pen - y_liv + y_gain)),
+            '年末資産残高(万円)': end_b,
+            '残高_表示': fmt_man(end_b),
+        })
+
+    if at_fire is None:
+        at_fire = bal
+    return pd.DataFrame(records), int(round(at_fire)), dep_year
+
+# ==============================================================================
+# 1. My資産
+# ==============================================================================
+if active_page == "1. My資産":
     if df_master.empty:
-        st.info("👈 左のサイドバーに楽天証券・SBI証券のCSVをまとめてドラッグ＆ドロップするか、「🧪 デモデータで試す」にチェックを入れてください。")
+        st.info("👈 左のサイドバーに楽天証券・SBI証券のCSVファイルをまとめてドラッグ＆ドロップしてください。")
     else:
         total_pnl = current_total_valuation - current_total_cost
         pnl_ratio = (total_pnl / current_total_cost * 100.0) if current_total_cost > 0 else 0.0
@@ -1274,7 +1398,7 @@ with tab1:
             st.plotly_chart(fig_tree, use_container_width=True)
 
         with col_g2:
-            st.subheader("🏦 証券会社 × 口座区分 内訳（単位：万円）")
+            st.subheader("🏦 証券会社 × 口座区分 内訳")
             grp_bar = df_master.groupby(['証券会社', '口座区分'], as_index=False)['評価額'].sum()
             grp_bar['評価額(万円)'] = (grp_bar['評価額'] / 10000.0).round(0)
             grp_bar['表示ラベル'] = [fmt_man(v) for v in grp_bar['評価額(万円)']]
@@ -1291,7 +1415,7 @@ with tab1:
             )
             st.plotly_chart(fig_bar, use_container_width=True)
 
-        st.subheader("📋 全保有銘柄一覧（今期予想 ➔ 直近実績 ＆ 税引前/税引後 併記）")
+        st.subheader("📋 全保有銘柄一覧")
         st.caption("※「1株配当(円)」列には、株式・ETFは『1株あたり年間配当金』、投資信託は『1万口あたり年間分配金』を表示しています。")
         disp_cols_t1 = [
             '証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名',
@@ -1316,16 +1440,16 @@ with tab1:
         )
 
 # ==============================================================================
-# TAB 2: 配当データ分析（税引前・税引後併記）& 入金月カレンダー & 増配シミュレーター
+# 2. 配当分析
 # ==============================================================================
-with tab2:
-    st.subheader("🎁 条件別 配当・分配金データ分析（今期予想優先 ➔ 直近実績 / 税引前・税引後併記）")
+elif active_page == "2. 配当分析":
+    st.subheader("🎁 条件別 配当・分配金データ分析")
 
     if df_master.empty:
-        st.warning("分析するデータがありません。サイドバーからCSVをドロップするか、デモデータを有効にしてください。")
+        st.warning("分析するデータがありません。左のサイドバーからCSVファイルをドロップしてください。")
     else:
         with st.container(border=True):
-            st.markdown("##### 🔍 分析条件の選択（自由組み合わせ）")
+            st.markdown("##### 🔍 分析条件の選択")
             f_col1, f_col2, f_col3 = st.columns(3)
 
             with f_col1:
@@ -1351,9 +1475,9 @@ with tab2:
 
         with st.expander("🛠️ 【1株配当・投信分配金の検算・微調整パネル】保有数量・配当単価(円)・入金月を確認・修正する（クリックで開閉）", expanded=True):
             st.info("""
-            💡 **配当・分配金の自動採用ルールと1円単位の検算について**：
-            * **今期予想 ➔ 直近実績の自動切替**：今期会社予想が出ている銘柄は**「今期予想」**を採用し、今期予想が未定・非開示（0円）の銘柄やETF・米国株・分配型投信は**「直近実績」**を自動採用しています（『採用基準』列に表示）。
-            * **手動での微調整**：もしお手元の管理シートと1株配当（投信は1万口あたり分配金）が異なる場合は、下の表の **`1株/1万口配当(円) ✏️`** をダブルクリックして書き換えるだけで、アプリ全体の合計金額が即座に1円単位で一致します。
+            💡 配当・分配金の自動採用ルールと1円単位の検算について：
+            ・今期会社予想が出ている銘柄は「今期予想」を採用し、今期予想が未定・非開示（0円）の銘柄やETF・米国株・分配型投信は「直近実績」を自動採用しています（『採用基準』列に表示）。
+            ・もしお手元の管理シートと1株配当（投信は1万口あたり分配金）が異なる場合は、下の表の「1株/1万口配当(円) ✏️」をダブルクリックして書き換えるだけで、アプリ全体の合計金額が即座に1円単位で一致します。
             """)
             edit_cols = ['証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '1株配当(円)', '採用基準', '配当入金月', '配当ソース']
             edited_df = st.data_editor(
@@ -1440,16 +1564,17 @@ with tab2:
                     with m_cols[idx_m]:
                         st.caption(m_title)
                         st.progress(m_prog)
-                        st.write(f"**{m_prog*100:.1f}%** (あと {max(m_target - monthly_div_post, 0):,.0f}円/月)")
+                        st.write(f"達成率 {m_prog*100:.1f}% (あと {max(m_target - monthly_div_post, 0):,.0f}円/月)")
 
-            # --- 月別 配当金入金カレンダー ---
+            # --- 月別 配当金入金カレンダー（単位：万円に統一） ---
             st.markdown("---")
-            st.markdown("#### 🗓️ 月別 配当・分配金入金カレンダー（1月〜12月）")
-            c_opt1, c_opt2 = st.columns(2)
-            with c_opt1:
-                cal_tax_basis = st.radio("カレンダーの税金表示", ["税引後（米国税10%＋国内税控除後の手取り）", "税引前（額面）"], index=0, horizontal=True)
-            with c_opt2:
-                cal_unit = st.radio("カレンダーグラフの表示単位", ["万円（例：3.5万円）", "千円（例：35.0千円）", "円（例：35,000円）"], index=0, horizontal=True)
+            st.markdown("#### 🗓️ 月別 配当・分配金入金カレンダー（1月〜12月 / 単位：万円）")
+            cal_tax_basis = st.radio(
+                "カレンダーの税金表示",
+                ["税引後（米国税10%＋国内税控除後の手取り）", "税引前（額面）"],
+                index=0,
+                horizontal=True
+            )
 
             target_div_col = '年間配当金(税引後)' if '税引後' in cal_tax_basis else '年間配当金(税引前)'
             tax_short_label = '税引後' if '税引後' in cal_tax_basis else '税引前'
@@ -1478,8 +1603,6 @@ with tab2:
                         cal_records.append({
                             '月': f"{m_idx}月",
                             '銘柄名': f"{row['銘柄名']} ({row['口座区分']})",
-                            '配当額(円)': round(amt),
-                            '配当額(千円)': round(amt / 1000.0, 1),
                             '配当額(万円)': round(amt / 10000.0, 2)
                         })
                 m_dict['年間合計'] = round(ann_val)
@@ -1489,33 +1612,17 @@ with tab2:
                 df_cal = pd.DataFrame(cal_records)
                 month_order = [f"{m}月" for m in range(1, 13)]
 
-                if "万円" in cal_unit:
-                    y_col_cal = '配当額(万円)'
-                    y_suffix = "万円"
-                    txt_tmpl = '%{y:,.1f}万円'
-                    y_fmt = ",.1f"
-                elif "千円" in cal_unit:
-                    y_col_cal = '配当額(千円)'
-                    y_suffix = "千円"
-                    txt_tmpl = '%{y:,.1f}千円'
-                    y_fmt = ",.1f"
-                else:
-                    y_col_cal = '配当額(円)'
-                    y_suffix = "円"
-                    txt_tmpl = '%{y:,.0f}円'
-                    y_fmt = ",d"
-
                 fig_cal = px.bar(
                     df_cal,
-                    x='月', y=y_col_cal, color='銘柄名',
+                    x='月', y='配当額(万円)', color='銘柄名',
                     category_orders={'月': month_order},
-                    title=f"1月〜12月 月別の配当・分配金 受取スケジュール（{tax_short_label} / 単位：{y_suffix}）"
+                    title=f"1月〜12月 月別の配当・分配金 受取スケジュール（{tax_short_label} / 単位：万円）"
                 )
-                fig_cal.update_traces(texttemplate=txt_tmpl, textposition='inside')
+                fig_cal.update_traces(texttemplate='%{y:,.1f}万円', textposition='inside')
                 fig_cal.update_layout(
                     xaxis_title="入金月",
-                    yaxis_title=f"受取配当金（{tax_short_label}・{y_suffix}）",
-                    yaxis=dict(tickformat=y_fmt, ticksuffix=y_suffix),
+                    yaxis_title=f"受取配当金（{tax_short_label}・万円）",
+                    yaxis=dict(tickformat=",.1f", ticksuffix="万円"),
                     hovermode="x unified"
                 )
                 st.plotly_chart(fig_cal, use_container_width=True)
@@ -1530,14 +1637,21 @@ with tab2:
             st.markdown("---")
             with st.container(border=True):
                 st.markdown("#### 🔄 配当再投資 ＆ 増配（YOC成長）シミュレーター（向こう1〜20年）")
-                st.caption("高配当株投資の最大の武器である「企業の増配（毎年配当が増える力）」と「受取配当金の再投資」によって、現在の配当金が将来いくらに育つかを試算します。")
+                st.caption("企業の増配（毎年配当が増える力）と受取配当金の再投資によって、現在の配当金が将来いくらに育つかを試算します。")
                 dc1, dc2, dc3 = st.columns(3)
                 with dc1:
-                    div_growth_rate = st.number_input("想定 年間増配率（%）", min_value=0.0, max_value=20.0, value=4.0, step=0.5, help="連続増配株やVYM等の過去平均増配率は年3%〜6%程度です")
+                    div_growth_rate = st.number_input("想定 年間増配率（%）", min_value=0.0, max_value=20.0, value=4.0, step=0.5)
                 with dc2:
                     reinvest_flag = st.radio("受取配当金の再投資", ["毎年全額を再投資する（複利加速）", "再投資しない（配当を生活費に使う）"], index=0)
                 with dc3:
                     add_yearly_high_div = st.number_input("高配当株への年間追加投資額（万円/年）", min_value=0, max_value=1000, value=0, step=10)
+
+                st.info("""
+                💡 【設定ガイド】「想定 年間増配率（%）」はどう設定すべき？（過去の実績データからの目安）
+                ・米国高配当株ETF（VYM・VIGなど）：過去10年の平均増配率は 年率 約6.0%〜7.5% と非常に堅調です。保守的に見積もるなら【4.0% 〜 5.0%】が目安です。
+                ・日本の高配当株（累進配当・連続増配銘柄：三菱商事・三井住友FG・東京海上・KDDIなど）：近年の株主還元強化により年5%〜10%超の増配も珍しくありませんが、長期平均として堅実に見積もるなら【3.0% 〜 5.0%】が適切です。
+                ・高利回り特化型ETF（SPYD・JEPIなど）：景気や金利によって分配金が上下するため、増配率は【0.0% 〜 2.0%】程度で保守的に試算することをおすすめします。
+                """)
 
                 if sum_div_post > 0 and sum_target_asset > 0:
                     cur_y_post = portfolio_yield_post / 100.0
@@ -1558,7 +1672,7 @@ with tab2:
 
                         yoc_future = (sim_div_yen / sim_cost_yen * 100.0) if sim_cost_yen > 0 else 0.0
                         drip_rows.append({
-                            '経過年': f"{y_i}年後({datetime.now().year + y_i}年)",
+                            '経過年': f"{y_i}年後({cur_year + y_i}年)",
                             '年間手取り配当金(万円)': round(sim_div_yen / 10000.0, 1),
                             '表示ラベル': fmt_man_or_sen(sim_div_yen),
                             '年間手取り配当金(円)': int(round(sim_div_yen)),
@@ -1612,7 +1726,7 @@ with tab2:
                 )
                 st.plotly_chart(fig_acc_div, use_container_width=True)
 
-            st.markdown("##### 📋 条件抽出銘柄の配当詳細・検算リスト（今期予想優先 ➔ 直近実績 / 税引前・税引後併記）")
+            st.markdown("##### 📋 条件抽出銘柄の配当詳細・検算リスト")
             display_cols = [
                 '証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名',
                 '保有数量', '基準資産額', '1株配当(円)', '採用基準',
@@ -1635,12 +1749,10 @@ with tab2:
             )
 
 # ==============================================================================
-# TAB 3: 積み立て想定シミュレーション（5桁万円は「〇億〇万円」表記に自動変換）
+# 3. 積立シミュ
 # ==============================================================================
-with tab3:
-    st.subheader("📈 積立投資 将来資産シミュレーション（1〜30年 / 1億円以上は『〇億〇万円』表示）")
-
-    base_year = datetime.now().year
+elif active_page == "3. 積立シミュ":
+    st.subheader("📈 積立投資 将来資産シミュレーション")
 
     with st.container(border=True):
         s_col1, s_col2, s_col3 = st.columns(3)
@@ -1648,21 +1760,23 @@ with tab3:
             sim_initial_man = st.number_input(
                 "現在の総資産額（万円）",
                 min_value=0, max_value=100000,
-                value=int(current_total_man), step=10,
-                help="CSVから読み取った現在の総資産額（万円）が初期セットされています"
+                value=int(st.session_state["shared_sim_initial_man"]), step=10
             )
+            st.session_state["shared_sim_initial_man"] = sim_initial_man
         with s_col2:
             sim_monthly_man = st.number_input(
                 "毎月の積立額（万円）",
                 min_value=0, max_value=1000,
-                value=10, step=1
+                value=int(st.session_state["shared_sim_monthly_man"]), step=1
             )
+            st.session_state["shared_sim_monthly_man"] = sim_monthly_man
         with s_col3:
             sim_rate = st.number_input(
                 "想定運用利回り（年率 %）",
                 min_value=0.0, max_value=30.0,
-                value=5.0, step=0.1
+                value=float(st.session_state["shared_sim_rate"]), step=0.1
             )
+            st.session_state["shared_sim_rate"] = sim_rate
 
     monthly_rate = (sim_rate / 100.0) / 12.0
     sim_rows = []
@@ -1676,7 +1790,7 @@ with tab3:
             principal_man += sim_monthly_man
         profit_man = balance_man - principal_man
         yearly_gain_man = balance_man - prev_balance_man
-        cal_year = base_year + year
+        cal_year = cur_year + year
         sim_rows.append({
             '年数_数値': year,
             '経過年数': f"{year}年目",
@@ -1743,7 +1857,7 @@ with tab3:
     )
     st.plotly_chart(fig_sim, use_container_width=True)
 
-    st.markdown("#### 📋 年次別 総資産想定額 一覧表（〇年目 ＆ 西暦 / 5桁万円は『〇億〇万円』表記）")
+    st.markdown("#### 📋 年次別 総資産想定額 一覧表")
     df_sim_table = df_sim_filtered[['経過年数', '西暦', '元本合計(万円)', '運用益合計(万円)', '総資産想定額(万円)', '年間増加額(万円)']]
     st.dataframe(
         df_sim_table.style.format({
@@ -1757,59 +1871,59 @@ with tab3:
     )
 
 # ==============================================================================
-# TAB 4: サイドFIRE シミュレーション & 5段階FIREステージ到達ロードマップ
+# 4. サイドFIRE診断
 # ==============================================================================
-with tab4:
+elif active_page == "4. サイドFIRE診断":
     st.subheader("🏖️ サイドFIRE 実現可能性シミュレーター ＆ 5段階FIREロードマップ")
-
-    now_dt = datetime.now()
-    cur_year, cur_month = now_dt.year, now_dt.month
 
     with st.container(border=True):
         st.markdown("##### ⚙️ シミュレーション前提条件の入力（単位：万円）")
         f_c1, f_c2, f_c3 = st.columns(3)
 
         with f_c1:
-            st.markdown("**① 現在の資産と運用条件**")
-            fire_init_man = st.number_input("現在の総資産額（万円）", min_value=0, max_value=100000, value=int(current_total_man), step=10, key="f_init")
-            fire_yield = st.number_input(
-                "想定運用利回り（年率 %）",
-                min_value=0.0, max_value=25.0, value=5.0, step=0.1, key="f_yield"
-            )
-            pre_fire_saving_man = st.number_input("サイドFIRE達成までの毎月積立額（万円）", min_value=0, max_value=500, value=10, step=1)
-            inflation_rate = st.number_input(
-                "想定インフレ率（生活費の上昇率・年率 %）",
-                min_value=0.0, max_value=10.0, value=1.0, step=0.1
-            )
+            st.markdown("① 現在の資産と運用条件")
+            fire_init_man = st.number_input("現在の総資産額（万円）", min_value=0, max_value=100000, value=int(st.session_state["shared_fire_init_man"]), step=10)
+            fire_yield = st.number_input("想定運用利回り（年率 %）", min_value=0.0, max_value=25.0, value=float(st.session_state["shared_fire_yield"]), step=0.1)
+            pre_fire_saving_man = st.number_input("サイドFIRE達成までの毎月積立額（万円）", min_value=0, max_value=500, value=int(st.session_state["shared_pre_fire_saving_man"]), step=1)
+            inflation_rate = st.number_input("想定インフレ率（生活費の上昇率・年率 %）", min_value=0.0, max_value=10.0, value=float(st.session_state["shared_inflation_rate"]), step=0.1)
+
+            st.session_state["shared_fire_init_man"] = fire_init_man
+            st.session_state["shared_fire_yield"] = fire_yield
+            st.session_state["shared_pre_fire_saving_man"] = pre_fire_saving_man
+            st.session_state["shared_inflation_rate"] = inflation_rate
 
         with f_c2:
-            st.markdown("**② サイドFIRE・年金スケジュール**")
-            sc1, sc2 = st.columns(2)
-            fire_year = sc1.number_input("サイドFIRE予定（年）", min_value=cur_year, max_value=cur_year + 50, value=cur_year + 5)
-            fire_month = sc2.number_input("サイドFIRE予定（月）", min_value=1, max_value=12, value=4)
+            st.markdown("② サイドFIRE・年金スケジュール（年単位）")
+            fire_year = st.number_input("サイドFIRE予定（年）", min_value=cur_year, max_value=cur_year + 50, value=int(st.session_state["shared_fire_year"]), step=1)
+            pension_year = st.number_input("年金受給開始（年）", min_value=cur_year, max_value=cur_year + 70, value=int(st.session_state["shared_pension_year"]), step=1)
+            sim_years_total = st.slider("シミュレーション検証期間（今後何年間を検証するか）", min_value=20, max_value=60, value=int(st.session_state["shared_sim_years_total"]))
 
-            pc1, pc2 = st.columns(2)
-            pension_year = pc1.number_input("年金受給開始（年）", min_value=cur_year, max_value=cur_year + 70, value=cur_year + 20)
-            pension_month = pc2.number_input("年金受給開始（月）", min_value=1, max_value=12, value=4)
-
-            sim_years_total = st.slider("シミュレーション検証期間（今後何年間を検証するか）", min_value=20, max_value=60, value=40)
+            st.session_state["shared_fire_year"] = fire_year
+            st.session_state["shared_pension_year"] = pension_year
+            st.session_state["shared_sim_years_total"] = sim_years_total
 
         with f_c3:
-            st.markdown("**③ サイドFIRE後の月次収支（万円）**")
-            living_cost_man = st.number_input("想定生活費（月額・万円）", min_value=5, max_value=200, value=25, step=1)
-            side_income_man = st.number_input("副業想定収入（手取り月額・万円）", min_value=0, max_value=200, value=10, step=1)
-            side_job_end_option = st.selectbox("副業の継続期間", ["年金受給開始まで継続", "サイドFIRE後10年間のみ", "サイドFIRE後15年間のみ", "生涯継続"])
-            pension_man = st.number_input("年金予定額（手取り月額・万円）", min_value=0, max_value=100, value=15, step=1)
+            st.markdown("③ サイドFIRE後の月次収支（万円）")
+            living_cost_man = st.number_input("想定生活費（月額・万円）", min_value=5, max_value=200, value=int(st.session_state["shared_living_cost_man"]), step=1)
+            side_income_man = st.number_input("副業想定収入（手取り月額・万円）", min_value=0, max_value=200, value=int(st.session_state["shared_side_income_man"]), step=1)
+            side_opts = ["年金受給開始まで継続", "サイドFIRE後10年間のみ", "サイドFIRE後15年間のみ", "生涯継続"]
+            side_job_end_option = st.selectbox("副業の継続期間", side_opts, index=side_opts.index(st.session_state["shared_side_job_end_option"]))
+            pension_man = st.number_input("年金予定額（手取り月額・万円）", min_value=0, max_value=100, value=int(st.session_state["shared_pension_man"]), step=1)
+
+            st.session_state["shared_living_cost_man"] = living_cost_man
+            st.session_state["shared_side_income_man"] = side_income_man
+            st.session_state["shared_side_job_end_option"] = side_job_end_option
+            st.session_state["shared_pension_man"] = pension_man
 
         st.info("""
-        💡 **【設定ガイド】「想定運用利回り」と「想定インフレ率」はどう設定すべき？（過去の実績データからの目安）**
-        * **📈 想定運用利回り（年率 %）の目安**：
-          * **全世界株式（オルカン等）**：過去30年の平均リターンは **年率 約7%〜8%**（円建て）ですが、暴落期や税金も考慮したサイドFIRE計画では **【4.0% 〜 5.0%】** に設定するのがFP・FIRE実践者の王道です。
-          * **米国株式（S&P500等）**：過去30年平均は **年率 約9%〜10%**。長期計画で堅実に見積もるなら **【5.0% 〜 6.0%】** が目安です。
-          * **日米高配当株・ETF中心（VYM / SPYD / 日本高配当株）**：配当利回り（税引後3〜3.5%）＋緩やかな増配・株価成長を合わせて **【4.0% 〜 5.0%】** が現実的です。
-        * **🛒 想定インフレ率（生活費の上昇率・年率 %）の目安**：
-          * **日本の過去実績と現在**：日本の過去30年平均は **年率 約0.3%〜0.5%**、直近の物価上昇期は **2%〜3%**（日本銀行の物価安定目標は **年率 2.0%**）。
-          * **推奨される設定値**：標準的なシミュレーションなら **【1.0% 〜 1.5%】**、将来の物価上昇リスクを厳しめに織り込むなら **【2.0%】** に設定するのがおすすめです。
+        💡 【設定ガイド】「想定運用利回り」と「想定インフレ率」はどう設定すべき？（過去の実績データからの目安）
+        📈 想定運用利回り（年率 %）の目安：
+        ・全世界株式（オルカン等）：過去30年の平均リターンは 年率 約7%〜8%（円建て）ですが、暴落期や税金も考慮したサイドFIRE計画では【4.0% 〜 5.0%】に設定するのがFP・FIRE実践者の王道です。
+        ・米国株式（S&P500等）：過去30年平均は 年率 約9%〜10%。長期計画で堅実に見積もるなら【5.0% 〜 6.0%】が目安です。
+        ・日米高配当株・ETF中心（VYM / SPYD / 日本高配当株）：配当利回り（税引後3〜3.5%）＋緩やかな増配・株価成長を合わせて【4.0% 〜 5.0%】が現実的です。
+        🛒 想定インフレ率（生活費の上昇率・年率 %）の目安：
+        ・日本の過去30年平均は 年率 約0.3%〜0.5%、直近の物価上昇期は 2%〜3%（日本銀行の物価安定目標は 年率 2.0%）。
+        ・推奨される設定値：標準的なシミュレーションなら【1.0% 〜 1.5%】、将来の物価上昇リスクを厳しめに織り込むなら【2.0%】に設定するのがおすすめです。
         """)
 
     # --- 5段階のFIREステージ別 到達ロードマップ診断 ---
@@ -1887,88 +2001,10 @@ with tab4:
     st.table(pd.DataFrame(stage_rows))
 
     # --- キャッシュフローシミュレーション実行 ---
-    def run_fire_simulation(init_man, y_rate, save_man, inf_rate, f_year, f_month, p_year, p_month, years_len, liv_man, side_man, side_opt, pen_man):
-        start_d = datetime(cur_year, cur_month, 1)
-        fire_d = datetime(int(f_year), int(f_month), 1)
-        pen_d = datetime(int(p_year), int(p_month), 1)
-
-        m_ret = (y_rate / 100.0) / 12.0
-        m_inf = (inf_rate / 100.0) / 12.0
-
-        bal = float(init_man)
-        at_fire = float(init_man) if fire_d <= start_d else None
-        dep_date = None
-        records = []
-
-        y_save = y_side = y_pen = y_liv = y_gain = 0.0
-
-        for m in range(years_len * 12):
-            c_dt = start_d + relativedelta(months=m)
-            is_f = c_dt >= fire_d
-            is_p = c_dt >= pen_d
-
-            if is_f and at_fire is None:
-                at_fire = bal
-
-            adj_liv = liv_man * ((1.0 + m_inf) ** m)
-
-            if not is_f:
-                gain = bal * m_ret
-                bal = bal + gain + save_man
-                y_save += save_man
-                y_gain += gain
-            else:
-                m_since_f = (c_dt.year - fire_d.year) * 12 + (c_dt.month - fire_d.month)
-                act_side = True
-                if side_opt == "年金受給開始まで継続" and is_p:
-                    act_side = False
-                elif side_opt == "サイドFIRE後10年間のみ" and m_since_f >= 120:
-                    act_side = False
-                elif side_opt == "サイドFIRE後15年間のみ" and m_since_f >= 180:
-                    act_side = False
-
-                c_side = side_man if act_side else 0.0
-                c_pen = pen_man if is_p else 0.0
-                net_cf = c_side + c_pen - adj_liv
-                gain = bal * m_ret if bal > 0 else 0.0
-                bal = bal + gain + net_cf
-
-                if bal <= 0 and dep_date is None:
-                    dep_date = c_dt
-
-                y_side += c_side
-                y_pen += c_pen
-                y_liv += adj_liv
-                y_gain += gain
-
-            if (m + 1) % 12 == 0:
-                y_num = (m + 1) // 12
-                st_str = "積立期" if not is_f else ("年金＋サイドFIRE" if is_p else "サイドFIRE期")
-                end_b = int(round(max(bal, 0.0)))
-                records.append({
-                    '西暦_数値': c_dt.year,
-                    '経過年数': f"{y_num}年目",
-                    '西暦': f"{c_dt.year}年",
-                    'ステータス': st_str,
-                    '年間積立額(万円)': int(round(y_save)),
-                    '年間副業収入(万円)': int(round(y_side)),
-                    '年間年金収入(万円)': int(round(y_pen)),
-                    '年間生活費(万円)': int(round(y_liv)),
-                    '年間運用益(万円)': int(round(y_gain)),
-                    '年間資産増減(万円)': int(round(y_save + y_side + y_pen - y_liv + y_gain)),
-                    '年末資産残高(万円)': end_b,
-                    '残高_表示': fmt_man(end_b),
-                })
-                y_save = y_side = y_pen = y_liv = y_gain = 0.0
-
-        if at_fire is None:
-            at_fire = bal
-        return pd.DataFrame(records), int(round(at_fire)), dep_date
-
-    df_fire_sim, asset_at_fire_man, depletion_date = run_fire_simulation(
+    df_fire_sim, asset_at_fire_man, depletion_year = run_fire_simulation_yearly(
         fire_init_man, fire_yield, pre_fire_saving_man, inflation_rate,
-        fire_year, fire_month, pension_year, pension_month,
-        sim_years_total, living_cost_man, side_income_man, side_job_end_option, pension_man
+        fire_year, pension_year, sim_years_total,
+        living_cost_man, side_income_man, side_job_end_option, pension_man
     )
 
     st.markdown("---")
@@ -1977,15 +2013,15 @@ with tab4:
     fire_gap_man = max(living_cost_man - side_income_man, 0)
     required_fire_man_4pct = int(round(fire_gap_man * 12 * 25))
 
-    if depletion_date is None and df_fire_sim.iloc[-1]['年末資産残高(万円)'] >= asset_at_fire_man:
-        st.success(f"🎉 **【判定：大成功（余裕でサイドFIRE可能）】** {fire_year}年{fire_month}月にサイドFIREしても資産は一切枯渇せず、運用益が取り崩しを上回り資産が増え続けます！")
-    elif depletion_date is None:
-        st.info(f"✅ **【判定：サイドFIRE可能】** 資産を取り崩しながらも、今後{sim_years_total}年間（{cur_year + sim_years_total}年まで）資産が枯渇せず維持できます。")
+    if depletion_year is None and df_fire_sim.iloc[-1]['年末資産残高(万円)'] >= asset_at_fire_man:
+        st.success(f"🎉 【判定：大成功（余裕でサイドFIRE可能）】 {fire_year}年にサイドFIREしても資産は一切枯渇せず、運用益が取り崩しを上回り資産が増え続けます！")
+    elif depletion_year is None:
+        st.info(f"✅ 【判定：サイドFIRE可能】 資産を取り崩しながらも、今後{sim_years_total}年間（{cur_year + sim_years_total}年まで）資産が枯渇せず維持できます。")
     else:
-        st.error(f"⚠️ **【判定：資金枯渇リスクあり】** この条件では **{depletion_date.year}年{depletion_date.month}月頃** に資産が枯渇する見込みです。サイドFIRE時期を遅らせるか、副業収入・生活費の見直しを推奨します。")
+        st.error(f"⚠️ 【判定：資金枯渇リスクあり】 この条件では {depletion_year}年頃 に資産が枯渇する見込みです。サイドFIRE時期を遅らせるか、副業収入・生活費の見直しを推奨します。")
 
     fk1, fk2, fk3, fk4 = st.columns(4)
-    fk1.metric(f"FIRE時点({fire_year}/{fire_month})想定資産", fmt_man(asset_at_fire_man))
+    fk1.metric(f"FIRE時点({fire_year}年)想定資産", fmt_man(asset_at_fire_man))
     fk2.metric("FIRE直後の毎月不足額", f"{fire_gap_man:,.0f} 万円/月", f"生活費{living_cost_man}万 - 副業{side_income_man}万")
     fk3.metric("4%ルール上の必要目標資産", fmt_man(required_fire_man_4pct), f"過不足 {fmt_man(asset_at_fire_man - required_fire_man_4pct, signed=True)}")
     fk4.metric(f"{sim_years_total}年後の最終資産残高", fmt_man(df_fire_sim.iloc[-1]['年末資産残高(万円)']))
@@ -2018,7 +2054,7 @@ with tab4:
     st.plotly_chart(fig_fire, use_container_width=True)
 
     with st.expander("🔥 サイドFIRE 感度分析マトリクス（利回り × 副業収入別の最終資産早見表）", expanded=True):
-        st.caption(f"「もし運用利回りが想定と違ったら？」「副業収入が増減したら？」のシナリオ別に、{sim_years_total}年後の最終資産残高を比較します（1億円以上は『〇億〇万円』表示）。")
+        st.caption(f"「もし運用利回りが想定と違ったら？」「副業収入が増減したら？」のシナリオ別に、{sim_years_total}年後の最終資産残高を比較します。")
         test_yields = [3.0, 4.0, 5.0, 6.0, 7.0]
         test_sides = [max(0, side_income_man - 5), side_income_man, side_income_man + 5, side_income_man + 10]
         matrix_data = {}
@@ -2026,20 +2062,20 @@ with tab4:
             col_label = f"副業 月{s_val:,.0f}万円"
             matrix_data[col_label] = []
             for y_val in test_yields:
-                df_tmp, _, dep_tmp = run_fire_simulation(
+                df_tmp, _, dep_tmp = run_fire_simulation_yearly(
                     fire_init_man, y_val, pre_fire_saving_man, inflation_rate,
-                    fire_year, fire_month, pension_year, pension_month,
-                    sim_years_total, living_cost_man, s_val, side_job_end_option, pension_man
+                    fire_year, pension_year, sim_years_total,
+                    living_cost_man, s_val, side_job_end_option, pension_man
                 )
                 end_bal = df_tmp.iloc[-1]['年末資産残高(万円)']
                 if dep_tmp is not None:
-                    matrix_data[col_label].append(f"枯渇({dep_tmp.year}年)")
+                    matrix_data[col_label].append(f"枯渇({dep_tmp}年)")
                 else:
                     matrix_data[col_label].append(fmt_man(end_bal))
         df_matrix = pd.DataFrame(matrix_data, index=[f"利回り {y:.1f}%" for y in test_yields])
         st.table(df_matrix)
 
-    st.markdown("##### 📋 年次別 キャッシュフロー＆資産推移表（5桁万円は『〇億〇万円』表記）")
+    st.markdown("##### 📋 年次別 キャッシュフロー＆資産推移表")
     df_fire_table = df_fire_sim.drop(columns=['西暦_数値', '残高_表示'])
     st.dataframe(
         df_fire_table.style.format({
@@ -2056,19 +2092,33 @@ with tab4:
     )
 
 # ==============================================================================
-# TAB 5: 【新機能】モンテカルロ・シミュレーション（乱数1,000回試行による確率診断）
+# 5. モンテカルロ診断
 # ==============================================================================
-with tab5:
-    st.subheader("🎲 モンテカルロ・シミュレーション（確率的資産推移 ＆ サイドFIRE成功確率診断）")
-    st.caption("株式市場の「毎年の価格変動リスク（ボラティリティ・暴落や好況のランダムな波）」を考慮し、数千通りの乱数シナリオから『サイドFIREの成功確率』と『将来資産の確率分布（上位10%〜下位10%）』を算出します。")
+elif active_page == "5. モンテカルロ診断":
+    st.subheader("🎲 モンテカルロ・シミュレーション（FIRE成功確率診断）")
+    st.caption("株式市場の毎年の価格変動リスク（ボラティリティ・暴落や好況のランダムな波）を考慮し、数千通りの乱数シナリオからFIREの成功確率と将来資産の確率分布を算出します。")
+
+    fire_init_man = int(st.session_state["shared_fire_init_man"])
+    fire_yield = float(st.session_state["shared_fire_yield"])
+    pre_fire_saving_man = int(st.session_state["shared_pre_fire_saving_man"])
+    inflation_rate = float(st.session_state["shared_inflation_rate"])
+    fire_year = int(st.session_state["shared_fire_year"])
+    pension_year = int(st.session_state["shared_pension_year"])
+    sim_years_total = int(st.session_state["shared_sim_years_total"])
+    living_cost_man = int(st.session_state["shared_living_cost_man"])
+    side_income_man = int(st.session_state["shared_side_income_man"])
+    side_job_end_option = st.session_state["shared_side_job_end_option"]
+    pension_man = int(st.session_state["shared_pension_man"])
+    sim_initial_man = int(st.session_state["shared_sim_initial_man"])
+    sim_monthly_man = int(st.session_state["shared_sim_monthly_man"])
 
     with st.container(border=True):
         st.markdown("##### ⚙️ モンテカルロ・シミュレーション設定")
         mc_mode = st.radio(
             "検証するシミュレーション対象",
             [
-                "① 🏖️ サイドFIRE計画（タブ4の積立 ➔ サイドFIRE取崩し ➔ 年金スケジュールを確率検証）",
-                "② 📈 純粋な積立投資（タブ3の毎月積立のみで向こう30年間運用した場合を確率検証）"
+                "① 🏖️ サイドFIRE計画（4. サイドFIRE診断のスケジュール・収支条件を確率検証）",
+                "② 📈 純粋な積立投資（3. 積立シミュの毎月積立条件で30年間運用した場合を確率検証）"
             ],
             index=0
         )
@@ -2077,14 +2127,12 @@ with tab5:
         with mc_c1:
             mc_expected_return = st.number_input(
                 "期待リターン（年率 %）",
-                min_value=0.0, max_value=25.0, value=float(fire_yield), step=0.1,
-                help="タブ4で設定した想定利回りが初期セットされています"
+                min_value=0.0, max_value=25.0, value=float(fire_yield), step=0.1
             )
         with mc_c2:
             mc_volatility = st.number_input(
                 "想定リスク / ボラティリティ（年率標準偏差 %）",
-                min_value=1.0, max_value=40.0, value=15.0, step=0.5,
-                help="毎年のリターンの振れ幅です。オルカンやS&P500は約15〜18%、高配当株・バランス型は約10〜14%が目安です。"
+                min_value=1.0, max_value=40.0, value=15.0, step=0.5
             )
         with mc_c3:
             mc_trials = st.selectbox("乱数シミュレーション試行回数", [500, 1000, 2000, 3000], index=1)
@@ -2092,17 +2140,15 @@ with tab5:
             mc_seed = st.number_input("乱数シード値（再現性固定用）", min_value=1, max_value=9999, value=42, step=1)
 
         st.info("""
-        💡 **【解説】ボラティリティ（年率標準偏差 %）の目安**：
-        * **全世界株式（オルカン）・S&P500（100%株式）**：過去実績のボラティリティは **【15.0% 〜 18.0%】** 程度です（約7割の年で「期待リターン ± 15%」の範囲に収まり、数年に一度 -20%〜-30% の下落が起きる水準）。
-        * **日米高配当株・連続増配株中心**：ディフェンシブ性があり **【12.0% 〜 15.0%】** 程度が目安です。
-        * **株式＋現金・債券のキャッシュクッション併用**：**【8.0% 〜 12.0%】** 程度に抑えられ、FIRE直後の暴落による資産枯渇リスク（収益率の順番リスク）を大幅に下げられます。
+        💡 【解説】ボラティリティ（年率標準偏差 %）の目安：
+        ・全世界株式（オルカン）・S&P500（100%株式）：過去実績のボラティリティは【15.0% 〜 18.0%】程度です（約7割の年で「期待リターン ± 15%」の範囲に収まり、数年に一度 -20%〜-30% の下落が起きる水準）。
+        ・日米高配当株・連続増配株中心：ディフェンシブ性があり【12.0% 〜 15.0%】程度が目安です。
+        ・株式＋現金・債券のキャッシュクッション併用：【8.0% 〜 12.0%】程度に抑えられ、FIRE直後の暴落による資産枯渇リスクを大幅に下げられます。
         """)
 
-    # --- 高速ベクトル化モンテカルロ計算（NumPy） ---
     rng = np.random.default_rng(int(mc_seed))
     mu_annual = mc_expected_return / 100.0
     sigma_annual = mc_volatility / 100.0
-    # 幾何ブラウン運動（月次ステップ）のドリフトとボラティリティ
     dt_step = 1.0 / 12.0
     drift_m = (mu_annual - 0.5 * (sigma_annual ** 2)) * dt_step
     vol_m = sigma_annual * np.sqrt(dt_step)
@@ -2110,9 +2156,6 @@ with tab5:
     if "①" in mc_mode:
         mc_years = int(sim_years_total)
         mc_init = float(fire_init_man)
-        start_d_mc = datetime(cur_year, cur_month, 1)
-        fire_d_mc = datetime(int(fire_year), int(fire_month), 1)
-        pen_d_mc = datetime(int(pension_year), int(pension_month), 1)
         m_inf_mc = (inflation_rate / 100.0) / 12.0
     else:
         mc_years = 30
@@ -2121,7 +2164,6 @@ with tab5:
     n_months_mc = mc_years * 12
     n_sims = int(mc_trials)
 
-    # 月次ランダムリターン行列 (n_sims × n_months_mc)
     rand_z = rng.standard_normal((n_sims, n_months_mc))
     monthly_growth_factors = np.exp(drift_m + vol_m * rand_z)
 
@@ -2131,22 +2173,24 @@ with tab5:
     yearly_depletion_rate = np.zeros(mc_years, dtype=np.float64)
 
     for m in range(n_months_mc):
+        y_idx_cur = m // 12
+        cal_y = cur_year + y_idx_cur + 1
+
         if "①" in mc_mode:
-            c_dt = start_d_mc + relativedelta(months=m)
-            is_f = c_dt >= fire_d_mc
-            is_p = c_dt >= pen_d_mc
+            is_f = (cal_y >= fire_year)
+            is_p = (cal_y >= pension_year)
             adj_liv = living_cost_man * ((1.0 + m_inf_mc) ** m)
 
             if not is_f:
                 cf = float(pre_fire_saving_man)
             else:
-                m_since_f = (c_dt.year - fire_d_mc.year) * 12 + (c_dt.month - fire_d_mc.month)
+                years_since_f = cal_y - fire_year
                 act_side = True
                 if side_job_end_option == "年金受給開始まで継続" and is_p:
                     act_side = False
-                elif side_job_end_option == "サイドFIRE後10年間のみ" and m_since_f >= 120:
+                elif side_job_end_option == "サイドFIRE後10年間のみ" and years_since_f >= 10:
                     act_side = False
-                elif side_job_end_option == "サイドFIRE後15年間のみ" and m_since_f >= 180:
+                elif side_job_end_option == "サイドFIRE後15年間のみ" and years_since_f >= 15:
                     act_side = False
                 c_side = float(side_income_man) if act_side else 0.0
                 c_pen = float(pension_man) if is_p else 0.0
@@ -2154,7 +2198,6 @@ with tab5:
         else:
             cf = float(sim_monthly_man)
 
-        # 既に枯渇したパスは0のまま維持
         active_mask = ~ever_depleted
         balances[active_mask] = balances[active_mask] * monthly_growth_factors[active_mask, m] + cf
         newly_depleted = balances <= 0.0
@@ -2162,11 +2205,9 @@ with tab5:
         balances[ever_depleted] = 0.0
 
         if (m + 1) % 12 == 0:
-            y_idx = (m + 1) // 12 - 1
-            yearly_paths[:, y_idx] = balances
-            yearly_depletion_rate[y_idx] = np.mean(ever_depleted) * 100.0
+            yearly_paths[:, y_idx_cur] = balances
+            yearly_depletion_rate[y_idx_cur] = np.mean(ever_depleted) * 100.0
 
-    # パーセンタイル集計
     p10 = np.percentile(yearly_paths, 10, axis=0)
     p25 = np.percentile(yearly_paths, 25, axis=0)
     p50 = np.percentile(yearly_paths, 50, axis=0)
@@ -2180,11 +2221,11 @@ with tab5:
 
     if "①" in mc_mode:
         if success_rate >= 85.0:
-            st.success(f"🎉 **【サイドFIRE成功確率：{success_rate:.1f}%（極めて安全）】** 暴落や市場の乱高下を考慮した{n_sims:,}回のシミュレーションでも、85%以上の高い確率で資産が枯渇せず維持できます！")
+            st.success(f"🎉 【サイドFIRE成功確率：{success_rate:.1f}%（極めて安全）】 暴落や市場の乱高下を考慮した{n_sims:,}回のシミュレーションでも、85%以上の高い確率で資産が枯渇せず維持できます！")
         elif success_rate >= 70.0:
-            st.info(f"✅ **【サイドFIRE成功確率：{success_rate:.1f}%（概ね良好）】** 7割以上のシナリオで資産を維持できます。暴落時に副業収入を少し増やすか生活費を抑える柔軟性があれば十分実現可能です。")
+            st.info(f"✅ 【サイドFIRE成功確率：{success_rate:.1f}%（概ね良好）】 7割以上のシナリオで資産を維持できます。暴落時に副業収入を少し増やすか生活費を抑える柔軟性があれば十分実現可能です。")
         else:
-            st.warning(f"⚠️ **【サイドFIRE成功確率：{success_rate:.1f}%（要注意：枯渇確率 {100-success_rate:.1f}%）】** FIRE直後に大暴落が来た場合などに資金が枯渇するリスクが高めです。初期資産を増やすか、取崩し額を抑えることを推奨します。")
+            st.warning(f"⚠️ 【サイドFIRE成功確率：{success_rate:.1f}%（要注意：枯渇確率 {100-success_rate:.1f}%）】 FIRE直後に大暴落が来た場合などに資金が枯渇するリスクが高めです。初期資産を増やすか、取崩し額を抑えることを推奨します。")
 
     mk1, mk2, mk3, mk4, mk5 = st.columns(5)
     mk1.metric(f"{mc_years}年後の成功確率(枯渇ゼロ)", f"{success_rate:.1f} %", f"枯渇確率 {100.0 - success_rate:.1f} %")
@@ -2193,11 +2234,9 @@ with tab5:
     mk4.metric("下位25%（やや不調）", fmt_man(p25[-1]), "25パーセンタイル")
     mk5.metric("下位10%（悲観・暴落シナリオ）", fmt_man(p10[-1]), "10パーセンタイル")
 
-    # ファンチャート（帯グラフ）作成
     years_axis = [cur_year + y for y in range(1, mc_years + 1)]
     fig_mc = go.Figure()
 
-    # 10%〜90% 帯
     fig_mc.add_trace(go.Scatter(
         x=years_axis, y=np.round(p90), mode='lines', line=dict(width=0),
         showlegend=False, hoverinfo='skip'
@@ -2208,7 +2247,6 @@ with tab5:
         name='10%〜90% 確率帯（8割が収まる範囲）', hoverinfo='skip'
     ))
 
-    # 25%〜75% 帯
     fig_mc.add_trace(go.Scatter(
         x=years_axis, y=np.round(p75), mode='lines', line=dict(width=0),
         showlegend=False, hoverinfo='skip'
@@ -2219,7 +2257,6 @@ with tab5:
         name='25%〜75% 確率帯（中心5割の範囲）', hoverinfo='skip'
     ))
 
-    # 各パーセンタイル線
     fig_mc.add_trace(go.Scatter(
         x=years_axis, y=np.round(p90), mode='lines',
         name='上位10%（好調）', line=dict(color='#059669', width=1.5, dash='dot'),
@@ -2257,7 +2294,7 @@ with tab5:
     )
     st.plotly_chart(fig_mc, use_container_width=True)
 
-    st.markdown("##### 📋 年次別 パーセンタイル資産推移 ＆ 枯渇確率 一覧表（5桁万円は『〇億〇万円』表記）")
+    st.markdown("##### 📋 年次別 パーセンタイル資産推移 ＆ 枯渇確率 一覧表")
     mc_table_rows = []
     for y_i in range(mc_years):
         mc_table_rows.append({
@@ -2274,13 +2311,15 @@ with tab5:
     st.dataframe(pd.DataFrame(mc_table_rows), use_container_width=True, hide_index=True)
 
 # ==============================================================================
-# TAB 6: 【新機能・提案⑤】サイドFIRE後の「税金・社会保険料（国保・年金）＆確定申告」リアル試算
+# 6. FIRE後の試算
 # ==============================================================================
-with tab6:
+elif active_page == "6. FIRE後の試算":
     st.subheader("🏥 サイドFIRE後の「税金・社会保険料（国保・年金）＆確定申告」リアル手取り試算")
-    st.caption("会社員を退職してサイドFIREした後に発生する「国民健康保険料」「国民年金」「所得税・住民税」を精緻に試算し、特定口座の配当金を確定申告すべきか（国保トラップ判定）まで診断します。")
+    st.caption("会社員を退職してサイドFIREした後に発生する「国民健康保険料」「国民年金」「所得税・住民税」を試算し、特定口座の配当金を確定申告すべきか（国保トラップ判定）まで診断します。")
 
-    # ポートフォリオからNISA配当と特定口座配当（国内/米国）を自動集計
+    side_income_man = int(st.session_state["shared_side_income_man"])
+    living_cost_man = int(st.session_state["shared_living_cost_man"])
+
     if not df_master.empty:
         nisa_div_auto_man = round(float(df_master.loc[df_master['口座区分'] == 'NISA', '年間配当金(税引後)'].sum()) / 10000.0, 1)
         tokutei_jp_mask = (df_master['口座区分'] != 'NISA') & (df_master['資産クラス'] != '米国株・米国ETF')
@@ -2297,18 +2336,17 @@ with tab6:
         tx_c1, tx_c2, tx_c3 = st.columns(3)
 
         with tx_c1:
-            st.markdown("**① 副業収入（事業所得 / 給与）**")
+            st.markdown("① 副業収入（事業所得 / 給与）")
             side_style = st.radio("副業の形態", ["個人事業主・フリーランス（青色申告）", "アルバイト・パート（給与所得）"], index=0)
             if "個人事業主" in side_style:
                 gross_side_man = st.number_input("副業の年間売上（万円/年）", min_value=0.0, max_value=5000.0, value=float(side_income_man * 12 + 40), step=10.0)
                 exp_side_man = st.number_input("年間の必要経費（通信費・PC・家事按分等 / 万円）", min_value=0.0, max_value=3000.0, value=40.0, step=5.0)
-                blue_ded_man = st.selectbox("青色申告特別控除（万円）", [65.0, 55.0, 10.0, 0.0], index=0, help="e-Taxによる複式簿記なら65万円控除が適用されます")
+                blue_ded_man = st.selectbox("青色申告特別控除（万円）", [65.0, 55.0, 10.0, 0.0], index=0)
                 net_side_cash_man = max(gross_side_man - exp_side_man, 0.0)
                 side_taxable_income_man = max(net_side_cash_man - blue_ded_man, 0.0)
             else:
                 gross_side_man = st.number_input("パート・アルバイト年間額面給与（万円/年）", min_value=0.0, max_value=2000.0, value=float(side_income_man * 12), step=10.0)
                 net_side_cash_man = gross_side_man
-                # 給与所得控除（最低55万円）
                 if gross_side_man <= 162.5:
                     sal_ded = 55.0
                 elif gross_side_man <= 180.0:
@@ -2320,14 +2358,14 @@ with tab6:
                 side_taxable_income_man = max(gross_side_man - sal_ded, 0.0)
 
         with tx_c2:
-            st.markdown("**② 配当金・株式売却益（自動連動）**")
-            nisa_div_man = st.number_input("NISA口座 年間配当金（手取り・万円/年）", min_value=0.0, max_value=2000.0, value=float(nisa_div_auto_man), step=1.0, help="NISAの配当は完全非課税で、国保料にも一切影響しません")
-            tok_jp_div_man = st.number_input("特定口座【日本株/投信】年間配当（税引前・万円/年）", min_value=0.0, max_value=2000.0, value=float(tokutei_jp_div_pre_man), step=1.0, help="総合課税で配当控除の対象になる国内配当です")
+            st.markdown("② 配当金・株式売却益（自動連動）")
+            nisa_div_man = st.number_input("NISA口座 年間配当金（手取り・万円/年）", min_value=0.0, max_value=2000.0, value=float(nisa_div_auto_man), step=1.0)
+            tok_jp_div_man = st.number_input("特定口座【日本株/投信】年間配当（税引前・万円/年）", min_value=0.0, max_value=2000.0, value=float(tokutei_jp_div_pre_man), step=1.0)
             tok_us_div_man = st.number_input("特定口座【米国株】年間配当（米税10%控除後・万円/年）", min_value=0.0, max_value=2000.0, value=float(tokutei_us_div_after_us_man), step=1.0)
-            tok_cap_gain_man = st.number_input("特定口座 年間株式売却益（利益部分・万円/年）", min_value=0.0, max_value=2000.0, value=0.0, step=5.0, help="4%ルール等で特定口座の投資信託・株を売却した際の『含み益（課税対象）』部分です")
+            tok_cap_gain_man = st.number_input("特定口座 年間株式売却益（利益部分・万円/年）", min_value=0.0, max_value=2000.0, value=0.0, step=5.0)
 
         with tx_c3:
-            st.markdown("**③ 年齢・家族構成・年金・所得控除**")
+            st.markdown("③ 年齢・家族構成・年金・所得控除")
             age_group = st.selectbox("年齢区分（国保の介護保険料判定）", ["40歳未満（介護分なし）", "40歳〜64歳（介護第2号被保険者）", "65歳以上"], index=1)
             household_members = st.number_input("国保の加入世帯人数（均等割の人数）", min_value=1, max_value=8, value=1, step=1)
             nenkin_status = st.selectbox(
@@ -2335,9 +2373,8 @@ with tab6:
                 ["1人分 全額納付（単身 / 配偶者別）", "夫婦2人分 全額納付（約42万円/年）", "半額免除申請", "全額免除 / マイクロ法人社保"],
                 index=0
             )
-            other_ded_man = st.number_input("iDeCo・小規模企業共済・生命保険等の控除合計（万円/年）", min_value=0.0, max_value=500.0, value=27.6, step=1.0, help="例：iDeCo月2.3万円なら年27.6万円が全額所得控除になります")
+            other_ded_man = st.number_input("iDeCo・小規模企業共済・生命保険等の控除合計（万円/年）", min_value=0.0, max_value=500.0, value=27.6, step=1.0)
 
-    # --- 税金・国民健康保険料・国民年金の厳密計算関数 ---
     if "1人分" in nenkin_status:
         nenkin_pay_man = 21.0
     elif "夫婦2人分" in nenkin_status:
@@ -2348,52 +2385,40 @@ with tab6:
         nenkin_pay_man = 0.0
 
     def calc_nhi_premium_man(total_income_for_nhi_man, members_cnt, age_grp_str):
-        """
-        国民健康保険料（年間・万円）の全国標準モデル試算（令和6〜8年度基準）
-        - 基礎賦課額（医療分）＋ 後期高齢者支援金分 ＋ 介護納付金分（40〜64歳）
-        - 低所得世帯の7割・5割・2割軽減（均等割・平等割の軽減）も自動判定！
-        """
-        # 賦課基準額 ＝ 総所得金額等 － 基礎控除43万円
         kijun_man = max(total_income_for_nhi_man - 43.0, 0.0)
         has_kaigo = ("40歳〜64歳" in age_grp_str)
-
-        # 所得割率（全国平均目安：医療+支援 約9.5%、介護分 約2.0%）
         rate_shotoku = 0.115 if has_kaigo else 0.095
         shotoku_wari = kijun_man * rate_shotoku
 
-        # 均等割＋平等割（1人あたり均等割 約5.0万円［介護込6.6万円］＋世帯平等割 約3.0万円）
         kinto_per_person = 6.6 if has_kaigo else 5.0
         byodo_per_household = 3.0
         base_fixed = kinto_per_person * members_cnt + byodo_per_household
 
-        # 法定軽減判定（7割・5割・2割軽減：基礎控除43万円を引く前の総所得で判定）
         if total_income_for_nhi_man <= 43.0 + 10.0 * (members_cnt - 1):
-            discount_factor = 0.30  # 7割軽減
+            discount_factor = 0.30
             discount_label = "7割軽減適用"
         elif total_income_for_nhi_man <= 43.0 + 29.5 * members_cnt + 10.0:
-            discount_factor = 0.50  # 5割軽減
+            discount_factor = 0.50
             discount_label = "5割軽減適用"
         elif total_income_for_nhi_man <= 43.0 + 54.5 * members_cnt + 10.0:
-            discount_factor = 0.80  # 2割軽減
+            discount_factor = 0.80
             discount_label = "2割軽減適用"
         else:
             discount_factor = 1.00
             discount_label = "軽減なし(通常)"
 
         total_nhi = shotoku_wari + (base_fixed * discount_factor)
-        max_cap = 106.0 if has_kaigo else 89.0  # 賦課限度額
+        max_cap = 106.0 if has_kaigo else 89.0
         return round(min(total_nhi, max_cap), 1), discount_label
 
     def calc_income_and_resident_tax(base_income_man, social_ins_man, other_d_man, comprehensive_div_man=0.0):
-        """所得税（復興税込）と住民税（所得割＋均等割）を計算する"""
         total_inc = base_income_man + comprehensive_div_man
-        total_ded_it = 48.0 + social_ins_man + other_d_man  # 所得税基礎控除48万
-        total_ded_rt = 43.0 + social_ins_man + other_d_man  # 住民税基礎控除43万
+        total_ded_it = 48.0 + social_ins_man + other_d_man
+        total_ded_rt = 43.0 + social_ins_man + other_d_man
 
         taxable_it = max(total_inc - total_ded_it, 0.0)
         taxable_rt = max(total_inc - total_ded_rt, 0.0)
 
-        # 所得税の速算表
         if taxable_it <= 195.0:
             it_raw = taxable_it * 0.05
         elif taxable_it <= 330.0:
@@ -2405,30 +2430,25 @@ with tab6:
         else:
             it_raw = taxable_it * 0.33 - 153.6
 
-        # 総合課税選択時の配当控除（課税総所得1,000万円以下：所得税10%、住民税2.8%）
         div_credit_it = comprehensive_div_man * 0.10 if comprehensive_div_man > 0 else 0.0
         div_credit_rt = comprehensive_div_man * 0.028 if comprehensive_div_man > 0 else 0.0
 
-        final_it = max(it_raw - div_credit_it, 0.0) * 1.021  # 復興特別所得税
+        final_it = max(it_raw - div_credit_it, 0.0) * 1.021
         final_rt = max(taxable_rt * 0.10 - div_credit_rt, 0.0) + (0.5 if total_inc > 45.0 else 0.0)
         return round(final_it, 2), round(final_rt, 2)
 
-    # --- パターンA：特定口座を「申告不要（源泉徴収のまま）」にした場合 ---
     nhi_a_man, nhi_a_lbl = calc_nhi_premium_man(side_taxable_income_man, household_members, age_group)
     soc_a_man = nhi_a_man + nenkin_pay_man
     it_a_man, rt_a_man = calc_income_and_resident_tax(side_taxable_income_man, soc_a_man, other_ded_man, 0.0)
     withheld_tax_a_man = round((tok_jp_div_man + tok_us_div_man + tok_cap_gain_man) * 0.20315, 2)
     total_burden_a_man = round(nhi_a_man + nenkin_pay_man + it_a_man + rt_a_man + withheld_tax_a_man, 1)
 
-    # --- パターンB：日本株配当を「総合課税で確定申告（配当控除適用）」した場合 ---
-    # 総合課税にすると、特定口座の配当が国保の算定所得に合算される（国保トラップ）
     nhi_b_man, nhi_b_lbl = calc_nhi_premium_man(side_taxable_income_man + tok_jp_div_man, household_members, age_group)
     soc_b_man = nhi_b_man + nenkin_pay_man
     it_b_man, rt_b_man = calc_income_and_resident_tax(side_taxable_income_man, soc_b_man, other_ded_man, tok_jp_div_man)
     withheld_other_b_man = round((tok_us_div_man + tok_cap_gain_man) * 0.20315, 2)
     total_burden_b_man = round(nhi_b_man + nenkin_pay_man + it_b_man + rt_b_man + withheld_other_b_man, 1)
 
-    # 収入合計（手元に入るキャッシュ総額・税引前ベース）
     total_gross_cash_man = net_side_cash_man + nisa_div_man + tok_jp_div_man + tok_us_div_man + tok_cap_gain_man
     net_takehome_a_man = round(total_gross_cash_man - total_burden_a_man, 1)
     net_takehome_b_man = round(total_gross_cash_man - total_burden_b_man, 1)
@@ -2442,10 +2462,10 @@ with tab6:
 
     if net_takehome_a_man >= net_takehome_b_man:
         diff_ab = round(net_takehome_a_man - net_takehome_b_man, 1)
-        st.success(f"💡 **【最適申告判定：① 申告不要（特定口座・源泉徴収のまま）が年間 約{diff_ab:,.1f}万円 お得！】** 総合課税で確定申告すると税金は安くなりますが、国民健康保険料が **{nhi_a_man:.1f}万円 ➔ {nhi_b_man:.1f}万円** に増える（国保トラップ）ため、**確定申告せず源泉徴収で完結させる方が手取りが多く残ります。**")
+        st.success(f"💡 【最適申告判定：① 申告不要（特定口座・源泉徴収のまま）が年間 約{diff_ab:,.1f}万円 お得！】 総合課税で確定申告すると税金は安くなりますが、国民健康保険料が {nhi_a_man:.1f}万円 ➔ {nhi_b_man:.1f}万円 に増える（国保トラップ）ため、確定申告せず源泉徴収で完結させる方が手取りが多く残ります。")
     else:
         diff_ba = round(net_takehome_b_man - net_takehome_a_man, 1)
-        st.info(f"💡 **【最適申告判定：② 総合課税で確定申告（配当控除）が年間 約{diff_ba:,.1f}万円 お得！】** 国保料の増加分（+{nhi_b_man - nhi_a_man:.1f}万円）よりも、配当控除による税金の還付メリットの方が上回るため、総合課税での確定申告が有利です。")
+        st.info(f"💡 【最適申告判定：② 総合課税で確定申告（配当控除）が年間 約{diff_ba:,.1f}万円 お得！】 国保料の増加分（+{nhi_b_man - nhi_a_man:.1f}万円）よりも、配当控除による税金の還付メリットの方が上回るため、総合課税での確定申告が有利です。")
 
     tk1, tk2, tk3, tk4 = st.columns(4)
     tk1.metric("年間 総収入（経費控除後・税引前）", f"{total_gross_cash_man:,.1f} 万円/年", f"月額換算 {total_gross_cash_man/12:,.1f} 万円/月")
@@ -2481,9 +2501,9 @@ with tab6:
     st.table(comp_df)
 
 # ==============================================================================
-# TAB 7: 為替レート（ドル円）連動シミュレーター & リバランス・暴落ストレステスト
+# 7. 暴落分析
 # ==============================================================================
-with tab7:
+elif active_page == "7. 暴落分析":
     st.subheader("💱 為替レート（ドル円）連動シミュレーター & リバランス・暴落分析")
 
     with st.container(border=True):
@@ -2491,7 +2511,7 @@ with tab7:
         st.caption("米国株・米国ETFおよび為替ヘッジなしの外国株インデックス投信（オルカン・S&P500等）が、円高・円安によっていくら増減するかをリアルタイム試算します。")
 
         if df_master.empty:
-            st.info("CSVを取り込むかデモデータを有効にすると、保有銘柄の外貨エクスポージャーを自動計算します。")
+            st.info("左のサイドバーからCSVデータを取り込むと、保有銘柄の外貨エクスポージャーを自動計算します。")
         else:
             fx_mask = df_master['為替影響'] == "米ドル連動(為替影響あり)"
             fx_asset_yen = float(df_master.loc[fx_mask, '評価額'].sum())
@@ -2550,7 +2570,7 @@ with tab7:
                         '年間配当(税引前)': f"{s_div_pre:,.0f} 円",
                         '年間配当(税引後)': f"{s_div_post:,.0f} 円"
                     })
-                st.markdown("**📋 ドル円レート別 資産額＆配当金（税引前・税引後）シミュレーション一覧表**")
+                st.markdown("📋 ドル円レート別 資産額＆配当金 シミュレーション一覧表")
                 st.table(pd.DataFrame(fx_rows))
 
     st.markdown("---")
