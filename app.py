@@ -108,6 +108,20 @@ FALLBACK_TRUST_DIV_MASTER = [
     ('ピクテ・グローバル・インカム株式', 360.0, 12.0, '毎月'),
 ]
 
+# 高配当ETF・インデックスETFの代表的なティッカーセット
+HIGH_DIV_ETF_TICKERS = {
+    'VYM', 'SPYD', 'HDV', 'JEPI', 'JEPQ', 'VIG', 'DVY', 'SDY', 'SCHD',
+    'QYLD', 'XYLD', 'RYLD', 'PFF', 'ARCC', 'MAIN', 'O', 'AGG', 'BND', 'LQD', 'TLT',
+    '1489', '1577', '1478', '1698', '2529', '1494', '1499', '1651', '2013', '2014',
+    '2564', '1343', '1476', '1488', '2556'
+}
+
+INDEX_ETF_TICKERS = {
+    'VOO', 'VTI', 'VT', 'IVV', 'SPY', 'QQQ', 'QQQM', 'DIA', 'IWM', 'VUG', 'VGT', 'XLK',
+    '1306', '1305', '1308', '1321', '1330', '1655', '2558', '2559', '2631',
+    '1545', '1557', '2568', '2569', '2633', '2634', '2244'
+}
+
 # ==============================================================================
 # 2. ユーティリティ & 金額フォーマット関数（5桁万円 ➔ 〇億〇万円 自動変換）
 # ==============================================================================
@@ -157,9 +171,7 @@ def fmt_man(man_val, signed=False):
         return f"{sign}{abs_m:,} 万円"
 
 def fmt_man_or_sen(yen_val, signed=False):
-    """
-    「円」単位の数値を直感的な日本語表記に変換する
-    """
+    """「円」単位の数値を直感的な日本語表記に変換する"""
     if pd.isna(yen_val):
         return "0 円"
     v = float(yen_val)
@@ -240,6 +252,52 @@ def classify_asset_type(name, ticker, is_trust=False):
     if any(k in s for k in ['eMAXIS', 'オルカン', 'オール・カントリー', 'インデックス', 'ファンド', 'スリム', 'たわら', 'ニッセイ', 'iFree', '投信']) and 'ETF' not in s.upper():
         return '投資信託'
     return '日本株・東証ETF'
+
+def classify_style_category(row, include_high_div_stocks=True, yield_threshold=3.0):
+    """
+    保有銘柄を『高配当系』『インデックス系』『個別株系』の3つに分類する関数
+    - 手動で『スタイル区分』が指定されている場合はそれを最優先
+    - 投資信託・ETF・REIT・個別株の特性および配当利回りから自動判定
+    """
+    manual_cat = str(row.get('スタイル区分', '')).strip()
+    if manual_cat in ['高配当系', 'インデックス系', '個別株系']:
+        return manual_cat
+
+    name = unicodedata.normalize('NFKC', str(row.get('銘柄名', ''))).strip()
+    name_up = name.upper()
+    ticker = unicodedata.normalize('NFKC', str(row.get('銘柄コード', ''))).strip().upper()
+    asset_cls = str(row.get('資産クラス', ''))
+    eff_y = clean_num(row.get('実質配当利回り(税引前%)', row.get('配当利回り(%)', 0.0)))
+    dps = clean_num(row.get('1株配当(円)', 0.0))
+
+    high_div_kw = ['高配当', '分配', 'インカム', '配当貴族', '毎月決算', '年4回', '年2回', '四半期決算', 'Cコース', 'Dコース', 'REIT', 'リート', '投資法人']
+    index_kw = ['eMAXIS', 'オルカン', 'オール・カントリー', 'インデックス', 'S&P500', 'S&P 500', '全米株式', '全世界株式', '先進国株式', '新興国株式', 'TOPIX', '日経225', '日経平均', 'NASDAQ', 'ナスダック', 'FANG+', 'たわら', 'ニッセイ', 'iFree', 'スリム', 'プラス', '上場投信']
+
+    # 1) 投資信託の場合
+    if asset_cls == '投資信託' or ticker.startswith('FUND'):
+        if any(k in name for k in high_div_kw) or dps > 0 or eff_y >= 1.5:
+            return '高配当系'
+        return 'インデックス系'
+
+    # 2) ETF・REITのティッカーまたは名称判定
+    if ticker in HIGH_DIV_ETF_TICKERS:
+        return '高配当系'
+    if ticker in INDEX_ETF_TICKERS:
+        return 'インデックス系'
+
+    is_etf_or_reit = ('ETF' in name_up) or ('上場投信' in name) or ('投資法人' in name) or ('REIT' in name_up) or ('INDEX' in name_up) or ('SPDR' in name_up) or ('バンガード' in name) or ('VANGUARD' in name_up) or ('ISHARES' in name_up) or ('iシェアーズ' in name) or ('MAXIS' in name_up) or ('NEXT FUNDS' in name_up)
+    if is_etf_or_reit:
+        if any(k in name for k in high_div_kw) or eff_y >= 2.5:
+            return '高配当系'
+        return 'インデックス系'
+
+    if any(k in name for k in index_kw):
+        return 'インデックス系'
+
+    # 3) 日米の個別株の場合
+    if include_high_div_stocks and eff_y >= yield_threshold:
+        return '高配当系'
+    return '個別株系'
 
 def is_fx_sensitive_asset(name, ticker, asset_class):
     """米ドル等の外貨為替レート（円高・円安）の影響を受ける資産かどうかを判定"""
@@ -753,7 +811,8 @@ def enrich_with_latest_dividends(df, usdjpy=150.0):
     df = df.copy()
     for col, default_v in [
         ('銘柄コード', ''), ('保有数量', 0.0), ('1株配当(円)', 0.0),
-        ('配当利回り(%)', 0.0), ('採用基準', ''), ('配当入金月', ''), ('配当ソース', ''), ('資産クラス', '')
+        ('配当利回り(%)', 0.0), ('採用基準', ''), ('配当入金月', ''), ('配当ソース', ''),
+        ('資産クラス', ''), ('スタイル区分', '')
     ]:
         if col not in df.columns:
             df[col] = default_v
@@ -821,11 +880,12 @@ def enrich_with_latest_dividends(df, usdjpy=150.0):
     ]
     return df
 
-def calc_exact_annual_dividend(df):
+def calc_exact_annual_dividend(df, include_high_div_stocks=True, yield_threshold=3.0):
     """
     - 個別株・ETF：『保有株数 × 1株あたり年間配当金(円)』
     - 投資信託：『(保有口数 ÷ 10,000) × 1万口あたり年間分配金(円)』
     - 税金は「税引前（額面100%）」と「税引後（米国税10%＋国内税20.315%控除）」の2パターンを常時算出
+    - 『高配当系 / インデックス系 / 個別株系』の投資スタイル分類も付与
     """
     if df.empty:
         return df
@@ -898,6 +958,12 @@ def calc_exact_annual_dividend(df):
         round((post / clean_num(val) * 100.0), 2) if clean_num(val) > 0 else 0.0
         for post, val in zip(df['年間配当金(税引後)'], df['評価額'])
     ]
+
+    # 高配当系・インデックス系・個別株系の3区分を判定
+    df['投資スタイル'] = [
+        classify_style_category(r, include_high_div_stocks=include_high_div_stocks, yield_threshold=yield_threshold)
+        for _, r in df.iterrows()
+    ]
     return df
 
 # ==============================================================================
@@ -945,6 +1011,8 @@ def detect_and_parse_csv(uploaded_file):
                 df_saved['保有数量'] = 0.0
             if '1株配当(円)' not in df_saved.columns:
                 df_saved['1株配当(円)'] = 0.0
+            if 'スタイル区分' not in df_saved.columns:
+                df_saved['スタイル区分'] = '自動判定'
             return df_saved
         except Exception:
             pass
@@ -1067,6 +1135,7 @@ def detect_and_parse_csv(uploaded_file):
                             '証券会社': broker_name,
                             '口座区分': row_acc,
                             '資産クラス': a_cls,
+                            'スタイル区分': '自動判定',
                             '銘柄コード': ext_code,
                             '銘柄名': name_str,
                             '保有数量': qty_num,
@@ -1200,17 +1269,29 @@ if st.session_state.get("last_file_sig") != file_sig:
             raw_master[col] = raw_master[col].apply(clean_num)
         if '口座区分' not in raw_master.columns:
             raw_master['口座区分'] = '特定'
+        if 'スタイル区分' not in raw_master.columns:
+            raw_master['スタイル区分'] = '自動判定'
 
         with st.spinner("🔍 各銘柄・投信の「今期予想配当（未定なら直近実績）」と「入金月」を厳密調査中..."):
             enriched_master = enrich_with_latest_dividends(raw_master, current_usdjpy)
         st.session_state["portfolio_df"] = enriched_master
     else:
         st.session_state["portfolio_df"] = pd.DataFrame(
-            columns=['証券会社', '口座区分', '資産クラス', '為替影響', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '評価損益', '1株配当(円)', '配当利回り(%)', '採用基準', '配当入金月', '配当ソース']
+            columns=['証券会社', '口座区分', '資産クラス', 'スタイル区分', '為替影響', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '評価損益', '1株配当(円)', '配当利回り(%)', '採用基準', '配当入金月', '配当ソース']
         )
     st.session_state["last_file_sig"] = file_sig
 
-df_master = calc_exact_annual_dividend(st.session_state["portfolio_df"])
+# スタイル分類基準のセッション初期値
+if "style_rule_include_hd_stocks" not in st.session_state:
+    st.session_state["style_rule_include_hd_stocks"] = True
+if "style_rule_yield_threshold" not in st.session_state:
+    st.session_state["style_rule_yield_threshold"] = 3.0
+
+df_master = calc_exact_annual_dividend(
+    st.session_state["portfolio_df"],
+    include_high_div_stocks=st.session_state["style_rule_include_hd_stocks"],
+    yield_threshold=st.session_state["style_rule_yield_threshold"]
+)
 
 # 現在の総資産額（円 & 万円[整数]）
 current_total_valuation = float(df_master['評価額'].sum()) if not df_master.empty else 10000000.0
@@ -1257,7 +1338,7 @@ st.radio(
 active_page = st.session_state["active_menu"]
 
 # ==============================================================================
-# サイドFIRE 年次シミュレーション共通関数（月を考慮せず「年」単位で設計）
+# サイドFIRE 年次シミュレーション共通関数（年単位）
 # ==============================================================================
 def run_fire_simulation_yearly(init_man, y_rate, save_man, inf_rate, f_year, p_year, years_len, liv_man, side_man, side_opt, pen_man):
     m_ret = (y_rate / 100.0) / 12.0
@@ -1381,6 +1462,131 @@ if active_page == "1. My資産":
             nc4.metric("1,800万円枠の残り投資可能額", fmt_man_or_sen(nisa_rem_yen), f"月10万積立であと {nisa_rem_yen / 1200000:.1f} 年" if nisa_rem_yen > 0 else "1,800万円満額達成🎉")
             st.progress(nisa_prog)
 
+        # --- 【新機能】高配当系・インデックス系・個別株系 アセットバランス全集計 ---
+        with st.container(border=True):
+            st.subheader("⚖️ 高配当系・インデックス系・個別株系 アセットバランス全集計")
+            rule_c1, rule_c2 = st.columns([3, 1])
+            with rule_c1:
+                style_rule_choice = st.radio(
+                    "個別株の分類基準",
+                    options=[
+                        "① 利回り基準込み（高配当ETF・分配投信 ＋ 配当利回り一定以上の高配当個別株 ＝『高配当系』、その他の個別株 ＝『個別株系』）",
+                        "② 商品種別のみ（高配当ETF・分配投信 ＝『高配当系』、インデックス投信・ETF ＝『インデックス系』、すべての個別株 ＝『個別株系』）"
+                    ],
+                    index=0 if st.session_state["style_rule_include_hd_stocks"] else 1
+                )
+            with rule_c2:
+                y_thresh = st.number_input(
+                    "高配当個別株とみなす利回り基準（税引前 %）",
+                    min_value=1.0, max_value=10.0,
+                    value=float(st.session_state["style_rule_yield_threshold"]),
+                    step=0.5,
+                    disabled=("②" in style_rule_choice)
+                )
+
+            new_inc_flag = ("①" in style_rule_choice)
+            if new_inc_flag != st.session_state["style_rule_include_hd_stocks"] or y_thresh != st.session_state["style_rule_yield_threshold"]:
+                st.session_state["style_rule_include_hd_stocks"] = new_inc_flag
+                st.session_state["style_rule_yield_threshold"] = y_thresh
+                st.rerun()
+
+            style_order = ['高配当系', 'インデックス系', '個別株系']
+            style_summary_rows = []
+            style_chart_data = []
+
+            for s_cat in style_order:
+                sub_df = df_master[df_master['投資スタイル'] == s_cat]
+                cnt_s = len(sub_df)
+                val_s = float(sub_df['評価額'].sum())
+                cost_s = float(sub_df['取得額'].sum())
+                pnl_s = val_s - cost_s
+                pnl_pct_s = (pnl_s / cost_s * 100.0) if cost_s > 0 else 0.0
+                share_s = (val_s / current_total_valuation * 100.0) if current_total_valuation > 0 else 0.0
+                div_pre_s = float(sub_df['年間配当金(税引前)'].sum())
+                div_post_s = float(sub_df['年間配当金(税引後)'].sum())
+                y_post_s = (div_post_s / val_s * 100.0) if val_s > 0 else 0.0
+
+                style_summary_rows.append({
+                    'アセット区分': s_cat,
+                    '保有銘柄数': f"{cnt_s} 銘柄",
+                    '現時点評価額': f"{fmt_man_or_sen(val_s)} ({val_s:,.0f} 円)",
+                    '構成比率': f"{share_s:.1f} %",
+                    '投資元本(取得額)': f"{fmt_man_or_sen(cost_s)} ({cost_s:,.0f} 円)",
+                    '含み損益': f"{fmt_man_or_sen(pnl_s, signed=True)} ({pnl_pct_s:+.1f}%)",
+                    '年間配当金(税引前)': f"{div_pre_s:,.0f} 円",
+                    '年間配当金(税引後)': f"{div_post_s:,.0f} 円",
+                    '実質利回り(税引後)': f"{y_post_s:.2f} %"
+                })
+                style_chart_data.append({
+                    'アセット区分': s_cat,
+                    '評価額': val_s,
+                    '評価額(万円)': round(val_s / 10000.0, 0),
+                    '構成比率': share_s,
+                    '年間配当金(税引後)': div_post_s,
+                    '表示ラベル': f"{fmt_man_or_sen(val_s)} ({share_s:.1f}%)"
+                })
+
+            # 全合計行の追加
+            style_summary_rows.append({
+                'アセット区分': '全資産 合計',
+                '保有銘柄数': f"{len(df_master)} 銘柄",
+                '現時点評価額': f"{fmt_man_or_sen(current_total_valuation)} ({current_total_valuation:,.0f} 円)",
+                '構成比率': "100.0 %",
+                '投資元本(取得額)': f"{fmt_man_or_sen(current_total_cost)} ({current_total_cost:,.0f} 円)",
+                '含み損益': f"{fmt_man_or_sen(total_pnl, signed=True)} ({pnl_ratio:+.1f}%)",
+                '年間配当金(税引前)': f"{current_annual_div_pre:,.0f} 円",
+                '年間配当金(税引後)': f"{current_annual_div_post:,.0f} 円",
+                '実質利回り(税引後)': f"{total_yield_post:.2f} %"
+            })
+
+            df_style_chart = pd.DataFrame(style_chart_data)
+
+            # 3区分のKPIカード
+            sc_col1, sc_col2, sc_col3 = st.columns(3)
+            for idx_sc, s_row in enumerate(style_chart_data):
+                target_col = [sc_col1, sc_col2, sc_col3][idx_sc]
+                target_col.metric(
+                    f"{s_row['アセット区分']} 評価額（比率 {s_row['構成比率']:.1f}%）",
+                    fmt_man_or_sen(s_row['評価額']),
+                    f"手取り配当 {s_row['年間配当金(税引後)']:,.0f} 円/年"
+                )
+
+            st.table(pd.DataFrame(style_summary_rows))
+
+            sg1, sg2 = st.columns(2)
+            with sg1:
+                df_style_nonzero = df_style_chart[df_style_chart['評価額'] > 0]
+                if not df_style_nonzero.empty:
+                    fig_style_pie = px.pie(
+                        df_style_nonzero,
+                        values='評価額', names='アセット区分',
+                        color='アセット区分',
+                        color_discrete_map={'高配当系': '#f59e0b', 'インデックス系': '#3b82f6', '個別株系': '#10b981'},
+                        title="高配当系・インデックス系・個別株系 構成比",
+                        hole=0.42
+                    )
+                    fig_style_pie.update_traces(textposition='inside', textinfo='percent+label')
+                    st.plotly_chart(fig_style_pie, use_container_width=True)
+
+            with sg2:
+                grp_style_acc = df_master.groupby(['投資スタイル', '口座区分'], as_index=False)['評価額'].sum()
+                grp_style_acc['評価額(万円)'] = (grp_style_acc['評価額'] / 10000.0).round(0)
+                grp_style_acc['表示ラベル'] = [fmt_man(v) for v in grp_style_acc['評価額(万円)']]
+                fig_style_bar = px.bar(
+                    grp_style_acc,
+                    x='投資スタイル', y='評価額(万円)', color='口座区分', barmode='group',
+                    category_orders={'投資スタイル': style_order},
+                    text='表示ラベル',
+                    title="アセット区分 × 口座区分別の残高内訳"
+                )
+                fig_style_bar.update_traces(textposition='outside')
+                fig_style_bar.update_layout(
+                    xaxis_title="アセット区分",
+                    yaxis_title="評価額（万円）",
+                    yaxis=dict(tickformat=",d", ticksuffix="万円")
+                )
+                st.plotly_chart(fig_style_bar, use_container_width=True)
+
         col_g1, col_g2 = st.columns(2)
 
         with col_g1:
@@ -1388,7 +1594,7 @@ if active_page == "1. My資産":
             st.caption("面積＝評価額の大きさ、色＝含み損益額を表します")
             fig_tree = px.treemap(
                 df_master,
-                path=[px.Constant("全資産"), '証券会社', '口座区分', '銘柄名'],
+                path=[px.Constant("全資産"), '投資スタイル', '口座区分', '銘柄名'],
                 values='評価額',
                 color='評価損益',
                 color_continuous_scale='RdYlGn',
@@ -1418,7 +1624,7 @@ if active_page == "1. My資産":
         st.subheader("📋 全保有銘柄一覧")
         st.caption("※「1株配当(円)」列には、株式・ETFは『1株あたり年間配当金』、投資信託は『1万口あたり年間分配金』を表示しています。")
         disp_cols_t1 = [
-            '証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名',
+            '証券会社', '口座区分', '投資スタイル', '資産クラス', '銘柄コード', '銘柄名',
             '保有数量', '評価額', '取得額', '評価損益',
             '1株配当(円)', '採用基準', '年間配当金(税引前)', '年間配当金(税引後)',
             '実質配当利回り(税引前%)', '実質配当利回り(税引後%)', '計算式', '税区分'
@@ -1473,16 +1679,25 @@ elif active_page == "2. 配当分析":
 
         basis_col = '評価額' if '現時点評価額' in asset_basis else '取得額'
 
-        with st.expander("🛠️ 【1株配当・投信分配金の検算・微調整パネル】保有数量・配当単価(円)・入金月を確認・修正する（クリックで開閉）", expanded=True):
+        with st.expander("🛠️ 【1株配当・投信分配金・スタイル区分の検算・微調整パネル】保有数量・配当単価(円)・入金月を確認・修正する（クリックで開閉）", expanded=True):
             st.info("""
             💡 配当・分配金の自動採用ルールと1円単位の検算について：
             ・今期会社予想が出ている銘柄は「今期予想」を採用し、今期予想が未定・非開示（0円）の銘柄やETF・米国株・分配型投信は「直近実績」を自動採用しています（『採用基準』列に表示）。
             ・もしお手元の管理シートと1株配当（投信は1万口あたり分配金）が異なる場合は、下の表の「1株/1万口配当(円) ✏️」をダブルクリックして書き換えるだけで、アプリ全体の合計金額が即座に1円単位で一致します。
+            ・「スタイル区分 ✏️」列から、銘柄ごとに『高配当系 / インデックス系 / 個別株系』を手動で固定することも可能です。
             """)
-            edit_cols = ['証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '1株配当(円)', '採用基準', '配当入金月', '配当ソース']
+            if 'スタイル区分' not in st.session_state["portfolio_df"].columns:
+                st.session_state["portfolio_df"]['スタイル区分'] = '自動判定'
+
+            edit_cols = ['証券会社', '口座区分', '資産クラス', 'スタイル区分', '銘柄コード', '銘柄名', '保有数量', '評価額', '取得額', '1株配当(円)', '採用基準', '配当入金月', '配当ソース']
             edited_df = st.data_editor(
                 st.session_state["portfolio_df"][edit_cols],
                 column_config={
+                    "スタイル区分": st.column_config.SelectboxColumn(
+                        "スタイル区分 ✏️",
+                        options=['自動判定', '高配当系', 'インデックス系', '個別株系'],
+                        default='自動判定'
+                    ),
                     "保有数量": st.column_config.NumberColumn("保有数量(株/口) ✏️", min_value=0.0, step=1.0, format="%d"),
                     "1株配当(円)": st.column_config.NumberColumn("1株/1万口配当(円) ✏️", help="株・ETFは1株あたり年間配当(円)、投資信託は1万口あたり年間分配金(円)", min_value=0.0, step=1.0, format="%.2f 円"),
                     "配当入金月": st.column_config.TextColumn("配当入金月 ✏️", help="カンマ区切りで入金月を入力（例: 6,12 や 3,6,9,12 や 毎月）"),
@@ -1499,8 +1714,9 @@ elif active_page == "2. 配当分析":
             if (not edited_df['保有数量'].equals(orig_df['保有数量'])) or \
                (not edited_df['1株配当(円)'].equals(orig_df['1株配当(円)'])) or \
                (not edited_df['配当入金月'].equals(orig_df['配当入金月'])) or \
+               (not edited_df['スタイル区分'].equals(orig_df['スタイル区分'])) or \
                (not edited_df['銘柄コード'].equals(orig_df['銘柄コード'])):
-                for c_up in ['保有数量', '1株配当(円)', '配当入金月', '銘柄コード']:
+                for c_up in ['保有数量', '1株配当(円)', '配当入金月', 'スタイル区分', '銘柄コード']:
                     st.session_state["portfolio_df"][c_up] = edited_df[c_up]
                 st.session_state["portfolio_df"]['配当ソース'] = "手動/保存"
                 st.session_state["portfolio_df"]['採用基準'] = "手動設定"
@@ -1728,7 +1944,7 @@ elif active_page == "2. 配当分析":
 
             st.markdown("##### 📋 条件抽出銘柄の配当詳細・検算リスト")
             display_cols = [
-                '証券会社', '口座区分', '資産クラス', '銘柄コード', '銘柄名',
+                '証券会社', '口座区分', '投資スタイル', '資産クラス', '銘柄コード', '銘柄名',
                 '保有数量', '基準資産額', '1株配当(円)', '採用基準',
                 '年間配当金(税引前)', '年間配当金(税引後)',
                 '基準対比利回り(税引前%)', '基準対比利回り(税引後%)',
@@ -2577,28 +2793,45 @@ elif active_page == "7. 暴落分析":
     col_r1, col_r2 = st.columns(2)
 
     with col_r1:
-        st.markdown("#### ⚖️ 2. アセットクラス別 リバランス計算機")
-        st.caption("現在の資産配分と目標配分のズレを計算し、どの資産クラスをいくら買い増し（または売却）すべきか算出します。")
+        st.markdown("#### ⚖️ 2. リバランス計算機")
+        st.caption("現在の資産配分と目標配分のズレを計算し、どの区分をいくら買い増し（または売却）すべきか算出します。")
 
         if df_master.empty:
             st.info("CSVデータを取り込むとリバランス計算が有効になります。")
         else:
-            class_grp = df_master.groupby('資産クラス', as_index=False)['評価額'].sum()
-            all_classes = ['投資信託', '日本株・東証ETF', '米国株・米国ETF']
-            cur_map = {row['資産クラス']: row['評価額'] / 10000.0 for _, row in class_grp.iterrows()}
-
-            rc1, rc2, rc3 = st.columns(3)
-            t_fund = rc1.number_input("目標：投資信託(%)", 0, 100, 50, step=5)
-            t_jp = rc2.number_input("目標：日本株・ETF(%)", 0, 100, 25, step=5)
-            t_us = rc3.number_input("目標：米国株・ETF(%)", 0, 100, 25, step=5)
-
-            if t_fund + t_jp + t_us != 100:
-                st.warning(f"目標比率の合計が {t_fund + t_jp + t_us}% です（100%になるように調整してください）。")
-
-            targets = {'投資信託': t_fund, '日本株・東証ETF': t_jp, '米国株・米国ETF': t_us}
+            reb_axis = st.radio(
+                "リバランスの基準区分",
+                ["① 投資スタイル別（高配当系 / インデックス系 / 個別株系）", "② 商品クラス別（投資信託 / 日本株・東証ETF / 米国株・米国ETF）"],
+                index=0
+            )
             total_man_exact = current_total_valuation / 10000.0
+
+            if "①" in reb_axis:
+                style_grp = df_master.groupby('投資スタイル', as_index=False)['評価額'].sum()
+                all_cats = ['高配当系', 'インデックス系', '個別株系']
+                cur_map = {row['投資スタイル']: row['評価額'] / 10000.0 for _, row in style_grp.iterrows()}
+
+                rc1, rc2, rc3 = st.columns(3)
+                t_c1 = rc1.number_input("目標：高配当系(%)", 0, 100, 40, step=5)
+                t_c2 = rc2.number_input("目標：インデックス系(%)", 0, 100, 50, step=5)
+                t_c3 = rc3.number_input("目標：個別株系(%)", 0, 100, 10, step=5)
+                targets = {'高配当系': t_c1, 'インデックス系': t_c2, '個別株系': t_c3}
+            else:
+                class_grp = df_master.groupby('資産クラス', as_index=False)['評価額'].sum()
+                all_cats = ['投資信託', '日本株・東証ETF', '米国株・米国ETF']
+                cur_map = {row['資産クラス']: row['評価額'] / 10000.0 for _, row in class_grp.iterrows()}
+
+                rc1, rc2, rc3 = st.columns(3)
+                t_c1 = rc1.number_input("目標：投資信託(%)", 0, 100, 50, step=5)
+                t_c2 = rc2.number_input("目標：日本株・ETF(%)", 0, 100, 25, step=5)
+                t_c3 = rc3.number_input("目標：米国株・ETF(%)", 0, 100, 25, step=5)
+                targets = {'投資信託': t_c1, '日本株・東証ETF': t_c2, '米国株・米国ETF': t_c3}
+
+            if sum(targets.values()) != 100:
+                st.warning(f"目標比率の合計が {sum(targets.values())}% です（100%になるように調整してください）。")
+
             reb_rows = []
-            for c_name in all_classes:
+            for c_name in all_cats:
                 c_man = cur_map.get(c_name, 0.0)
                 c_pct = (c_man / total_man_exact * 100.0) if total_man_exact > 0 else 0.0
                 t_pct = targets[c_name]
@@ -2606,7 +2839,7 @@ elif active_page == "7. 暴落分析":
                 diff_man = ideal_man - c_man
                 action = f"{fmt_man(diff_man, signed=True)} 買増" if diff_man >= 0 else f"{fmt_man(diff_man, signed=True)} 売却"
                 reb_rows.append({
-                    '資産クラス': c_name,
+                    'アセット区分': c_name,
                     '現在評価額': fmt_man(c_man),
                     '現在比率': f"{c_pct:.1f} %",
                     '目標比率': f"{t_pct:.0f} %",
