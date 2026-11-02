@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -108,7 +109,6 @@ FALLBACK_TRUST_DIV_MASTER = [
     ('ピクテ・グローバル・インカム株式', 360.0, 12.0, '毎月'),
 ]
 
-# 高配当ETF・インデックスETFの代表的なティッカーセット
 HIGH_DIV_ETF_TICKERS = {
     'VYM', 'SPYD', 'HDV', 'JEPI', 'JEPQ', 'VIG', 'DVY', 'SDY', 'SCHD',
     'QYLD', 'XYLD', 'RYLD', 'PFF', 'ARCC', 'MAIN', 'O', 'AGG', 'BND', 'LQD', 'TLT',
@@ -254,11 +254,7 @@ def classify_asset_type(name, ticker, is_trust=False):
     return '日本株・東証ETF'
 
 def classify_style_category(row, include_high_div_stocks=True, yield_threshold=3.0):
-    """
-    保有銘柄を『高配当系』『インデックス系』『個別株系』の3つに分類する関数
-    - 手動で『スタイル区分』が指定されている場合はそれを最優先
-    - 投資信託・ETF・REIT・個別株の特性および配当利回りから自動判定
-    """
+    """保有銘柄を『高配当系』『インデックス系』『個別株系』の3つに分類する関数"""
     manual_cat = str(row.get('スタイル区分', '')).strip()
     if manual_cat in ['高配当系', 'インデックス系', '個別株系']:
         return manual_cat
@@ -273,13 +269,11 @@ def classify_style_category(row, include_high_div_stocks=True, yield_threshold=3
     high_div_kw = ['高配当', '分配', 'インカム', '配当貴族', '毎月決算', '年4回', '年2回', '四半期決算', 'Cコース', 'Dコース', 'REIT', 'リート', '投資法人']
     index_kw = ['eMAXIS', 'オルカン', 'オール・カントリー', 'インデックス', 'S&P500', 'S&P 500', '全米株式', '全世界株式', '先進国株式', '新興国株式', 'TOPIX', '日経225', '日経平均', 'NASDAQ', 'ナスダック', 'FANG+', 'たわら', 'ニッセイ', 'iFree', 'スリム', 'プラス', '上場投信']
 
-    # 1) 投資信託の場合
     if asset_cls == '投資信託' or ticker.startswith('FUND'):
         if any(k in name for k in high_div_kw) or dps > 0 or eff_y >= 1.5:
             return '高配当系'
         return 'インデックス系'
 
-    # 2) ETF・REITのティッカーまたは名称判定
     if ticker in HIGH_DIV_ETF_TICKERS:
         return '高配当系'
     if ticker in INDEX_ETF_TICKERS:
@@ -294,7 +288,6 @@ def classify_style_category(row, include_high_div_stocks=True, yield_threshold=3
     if any(k in name for k in index_kw):
         return 'インデックス系'
 
-    # 3) 日米の個別株の場合
     if include_high_div_stocks and eff_y >= yield_threshold:
         return '高配当系'
     return '個別株系'
@@ -959,7 +952,6 @@ def calc_exact_annual_dividend(df, include_high_div_stocks=True, yield_threshold
         for post, val in zip(df['年間配当金(税引後)'], df['評価額'])
     ]
 
-    # 高配当系・インデックス系・個別株系の3区分を判定
     df['投資スタイル'] = [
         classify_style_category(r, include_high_div_stocks=include_high_div_stocks, yield_threshold=yield_threshold)
         for _, r in df.iterrows()
@@ -1166,7 +1158,8 @@ MENU_OPTIONS = [
     "4. サイドFIRE診断",
     "5. モンテカルロ診断",
     "6. FIRE後の試算",
-    "7. 暴落分析"
+    "7. 暴落分析",
+    "8. PDFレポート"
 ]
 
 if "active_menu" not in st.session_state:
@@ -1320,6 +1313,15 @@ default_shared = {
     "shared_side_income_man": 10,
     "shared_side_job_end_option": "年金受給開始まで継続",
     "shared_pension_man": 15,
+    "shared_div_growth_rate": 4.0,
+    "shared_reinvest_flag": "毎年全額を再投資する（複利加速）",
+    "shared_add_yearly_high_div": 0,
+    "shared_mc_volatility": 15.0,
+    "shared_mc_trials": 1000,
+    "shared_mc_seed": 42,
+    "shared_reb_hd": 40,
+    "shared_reb_idx": 50,
+    "shared_reb_stk": 10,
 }
 for k_def, v_def in default_shared.items():
     if k_def not in st.session_state:
@@ -1338,7 +1340,7 @@ st.radio(
 active_page = st.session_state["active_menu"]
 
 # ==============================================================================
-# サイドFIRE 年次シミュレーション共通関数（年単位）
+# 共通シミュレーション計算関数群（各タブおよび総合PDFレポートで共用）
 # ==============================================================================
 def run_fire_simulation_yearly(init_man, y_rate, save_man, inf_rate, f_year, p_year, years_len, liv_man, side_man, side_opt, pen_man):
     m_ret = (y_rate / 100.0) / 12.0
@@ -1413,6 +1415,71 @@ def run_fire_simulation_yearly(init_man, y_rate, save_man, inf_rate, f_year, p_y
         at_fire = bal
     return pd.DataFrame(records), int(round(at_fire)), dep_year
 
+def estimate_years_to_target(curr_m, target_m, monthly_save_m, annual_r_pct):
+    if curr_m >= target_m:
+        return "達成済 🎉"
+    mr = (annual_r_pct / 100.0) / 12.0
+    b = float(curr_m)
+    for m_i in range(1, 601):
+        b = b * (1.0 + mr) + monthly_save_m
+        if b >= target_m:
+            years_needed = m_i / 12.0
+            return f"あと約 {years_needed:.1f} 年 ({cur_year + int(round(years_needed))}年頃)"
+    return "50年以上"
+
+def calc_nhi_premium_man(total_income_for_nhi_man, members_cnt, age_grp_str):
+    kijun_man = max(total_income_for_nhi_man - 43.0, 0.0)
+    has_kaigo = ("40歳〜64歳" in age_grp_str)
+    rate_shotoku = 0.115 if has_kaigo else 0.095
+    shotoku_wari = kijun_man * rate_shotoku
+
+    kinto_per_person = 6.6 if has_kaigo else 5.0
+    byodo_per_household = 3.0
+    base_fixed = kinto_per_person * members_cnt + byodo_per_household
+
+    if total_income_for_nhi_man <= 43.0 + 10.0 * (members_cnt - 1):
+        discount_factor = 0.30
+        discount_label = "7割軽減適用"
+    elif total_income_for_nhi_man <= 43.0 + 29.5 * members_cnt + 10.0:
+        discount_factor = 0.50
+        discount_label = "5割軽減適用"
+    elif total_income_for_nhi_man <= 43.0 + 54.5 * members_cnt + 10.0:
+        discount_factor = 0.80
+        discount_label = "2割軽減適用"
+    else:
+        discount_factor = 1.00
+        discount_label = "軽減なし(通常)"
+
+    total_nhi = shotoku_wari + (base_fixed * discount_factor)
+    max_cap = 106.0 if has_kaigo else 89.0
+    return round(min(total_nhi, max_cap), 1), discount_label
+
+def calc_income_and_resident_tax(base_income_man, social_ins_man, other_d_man, comprehensive_div_man=0.0):
+    total_inc = base_income_man + comprehensive_div_man
+    total_ded_it = 48.0 + social_ins_man + other_d_man
+    total_ded_rt = 43.0 + social_ins_man + other_d_man
+
+    taxable_it = max(total_inc - total_ded_it, 0.0)
+    taxable_rt = max(total_inc - total_ded_rt, 0.0)
+
+    if taxable_it <= 195.0:
+        it_raw = taxable_it * 0.05
+    elif taxable_it <= 330.0:
+        it_raw = taxable_it * 0.10 - 9.75
+    elif taxable_it <= 695.0:
+        it_raw = taxable_it * 0.20 - 42.75
+    elif taxable_it <= 900.0:
+        it_raw = taxable_it * 0.23 - 63.6
+    else:
+        it_raw = taxable_it * 0.33 - 153.6
+
+    div_credit_it = comprehensive_div_man * 0.10 if comprehensive_div_man > 0 else 0.0
+    div_credit_rt = comprehensive_div_man * 0.028 if comprehensive_div_man > 0 else 0.0
+
+    final_it = max(it_raw - div_credit_it, 0.0) * 1.021
+    final_rt = max(taxable_rt * 0.10 - div_credit_rt, 0.0) + (0.5 if total_inc > 45.0 else 0.0)
+    return round(final_it, 2), round(final_rt, 2)
+
 # ==============================================================================
 # 1. My資産
 # ==============================================================================
@@ -1462,7 +1529,7 @@ if active_page == "1. My資産":
             nc4.metric("1,800万円枠の残り投資可能額", fmt_man_or_sen(nisa_rem_yen), f"月10万積立であと {nisa_rem_yen / 1200000:.1f} 年" if nisa_rem_yen > 0 else "1,800万円満額達成🎉")
             st.progress(nisa_prog)
 
-        # --- 【新機能】高配当系・インデックス系・個別株系 アセットバランス全集計 ---
+        # --- 高配当系・インデックス系・個別株系 アセットバランス全集計 ---
         with st.container(border=True):
             st.subheader("⚖️ 高配当系・インデックス系・個別株系 アセットバランス全集計")
             rule_c1, rule_c2 = st.columns([3, 1])
@@ -1526,7 +1593,6 @@ if active_page == "1. My資産":
                     '表示ラベル': f"{fmt_man_or_sen(val_s)} ({share_s:.1f}%)"
                 })
 
-            # 全合計行の追加
             style_summary_rows.append({
                 'アセット区分': '全資産 合計',
                 '保有銘柄数': f"{len(df_master)} 銘柄",
@@ -1541,7 +1607,6 @@ if active_page == "1. My資産":
 
             df_style_chart = pd.DataFrame(style_chart_data)
 
-            # 3区分のKPIカード
             sc_col1, sc_col2, sc_col3 = st.columns(3)
             for idx_sc, s_row in enumerate(style_chart_data):
                 target_col = [sc_col1, sc_col2, sc_col3][idx_sc]
@@ -1856,11 +1921,15 @@ elif active_page == "2. 配当分析":
                 st.caption("企業の増配（毎年配当が増える力）と受取配当金の再投資によって、現在の配当金が将来いくらに育つかを試算します。")
                 dc1, dc2, dc3 = st.columns(3)
                 with dc1:
-                    div_growth_rate = st.number_input("想定 年間増配率（%）", min_value=0.0, max_value=20.0, value=4.0, step=0.5)
+                    div_growth_rate = st.number_input("想定 年間増配率（%）", min_value=0.0, max_value=20.0, value=float(st.session_state["shared_div_growth_rate"]), step=0.5)
+                    st.session_state["shared_div_growth_rate"] = div_growth_rate
                 with dc2:
-                    reinvest_flag = st.radio("受取配当金の再投資", ["毎年全額を再投資する（複利加速）", "再投資しない（配当を生活費に使う）"], index=0)
+                    reinv_opts = ["毎年全額を再投資する（複利加速）", "再投資しない（配当を生活費に使う）"]
+                    reinvest_flag = st.radio("受取配当金の再投資", reinv_opts, index=reinv_opts.index(st.session_state["shared_reinvest_flag"]))
+                    st.session_state["shared_reinvest_flag"] = reinvest_flag
                 with dc3:
-                    add_yearly_high_div = st.number_input("高配当株への年間追加投資額（万円/年）", min_value=0, max_value=1000, value=0, step=10)
+                    add_yearly_high_div = st.number_input("高配当株への年間追加投資額（万円/年）", min_value=0, max_value=1000, value=int(st.session_state["shared_add_yearly_high_div"]), step=10)
+                    st.session_state["shared_add_yearly_high_div"] = add_yearly_high_div
 
                 st.info("""
                 💡 【設定ガイド】「想定 年間増配率（%）」はどう設定すべき？（過去の実績データからの目安）
@@ -2146,18 +2215,6 @@ elif active_page == "4. サイドFIRE診断":
     st.markdown("#### 🏔️ あなたの「5段階 FIREステージ」到達ロードマップ診断")
     st.caption("現在の資産・生活費・副業収入・手取り配当利回りから、5つの代表的なFIREステージの目標金額と到達予想時期を診断します。")
 
-    def estimate_years_to_target(curr_m, target_m, monthly_save_m, annual_r_pct):
-        if curr_m >= target_m:
-            return "達成済 🎉"
-        mr = (annual_r_pct / 100.0) / 12.0
-        b = float(curr_m)
-        for m_i in range(1, 601):
-            b = b * (1.0 + mr) + monthly_save_m
-            if b >= target_m:
-                years_needed = m_i / 12.0
-                return f"あと約 {years_needed:.1f} 年 ({cur_year + int(round(years_needed))}年頃)"
-        return "50年以上"
-
     years_to_pension = max(1, int(pension_year - cur_year))
     net_retire_need_man = max(living_cost_man - pension_man, 5) * 12 * 25
     real_return = max((fire_yield - inflation_rate) / 100.0, 0.01)
@@ -2348,12 +2405,16 @@ elif active_page == "5. モンテカルロ診断":
         with mc_c2:
             mc_volatility = st.number_input(
                 "想定リスク / ボラティリティ（年率標準偏差 %）",
-                min_value=1.0, max_value=40.0, value=15.0, step=0.5
+                min_value=1.0, max_value=40.0, value=float(st.session_state["shared_mc_volatility"]), step=0.5
             )
+            st.session_state["shared_mc_volatility"] = mc_volatility
         with mc_c3:
-            mc_trials = st.selectbox("乱数シミュレーション試行回数", [500, 1000, 2000, 3000], index=1)
+            trial_opts = [500, 1000, 2000, 3000]
+            mc_trials = st.selectbox("乱数シミュレーション試行回数", trial_opts, index=trial_opts.index(int(st.session_state["shared_mc_trials"])))
+            st.session_state["shared_mc_trials"] = mc_trials
         with mc_c4:
-            mc_seed = st.number_input("乱数シード値（再現性固定用）", min_value=1, max_value=9999, value=42, step=1)
+            mc_seed = st.number_input("乱数シード値（再現性固定用）", min_value=1, max_value=9999, value=int(st.session_state["shared_mc_seed"]), step=1)
+            st.session_state["shared_mc_seed"] = mc_seed
 
         st.info("""
         💡 【解説】ボラティリティ（年率標準偏差 %）の目安：
@@ -2600,59 +2661,6 @@ elif active_page == "6. FIRE後の試算":
     else:
         nenkin_pay_man = 0.0
 
-    def calc_nhi_premium_man(total_income_for_nhi_man, members_cnt, age_grp_str):
-        kijun_man = max(total_income_for_nhi_man - 43.0, 0.0)
-        has_kaigo = ("40歳〜64歳" in age_grp_str)
-        rate_shotoku = 0.115 if has_kaigo else 0.095
-        shotoku_wari = kijun_man * rate_shotoku
-
-        kinto_per_person = 6.6 if has_kaigo else 5.0
-        byodo_per_household = 3.0
-        base_fixed = kinto_per_person * members_cnt + byodo_per_household
-
-        if total_income_for_nhi_man <= 43.0 + 10.0 * (members_cnt - 1):
-            discount_factor = 0.30
-            discount_label = "7割軽減適用"
-        elif total_income_for_nhi_man <= 43.0 + 29.5 * members_cnt + 10.0:
-            discount_factor = 0.50
-            discount_label = "5割軽減適用"
-        elif total_income_for_nhi_man <= 43.0 + 54.5 * members_cnt + 10.0:
-            discount_factor = 0.80
-            discount_label = "2割軽減適用"
-        else:
-            discount_factor = 1.00
-            discount_label = "軽減なし(通常)"
-
-        total_nhi = shotoku_wari + (base_fixed * discount_factor)
-        max_cap = 106.0 if has_kaigo else 89.0
-        return round(min(total_nhi, max_cap), 1), discount_label
-
-    def calc_income_and_resident_tax(base_income_man, social_ins_man, other_d_man, comprehensive_div_man=0.0):
-        total_inc = base_income_man + comprehensive_div_man
-        total_ded_it = 48.0 + social_ins_man + other_d_man
-        total_ded_rt = 43.0 + social_ins_man + other_d_man
-
-        taxable_it = max(total_inc - total_ded_it, 0.0)
-        taxable_rt = max(total_inc - total_ded_rt, 0.0)
-
-        if taxable_it <= 195.0:
-            it_raw = taxable_it * 0.05
-        elif taxable_it <= 330.0:
-            it_raw = taxable_it * 0.10 - 9.75
-        elif taxable_it <= 695.0:
-            it_raw = taxable_it * 0.20 - 42.75
-        elif taxable_it <= 900.0:
-            it_raw = taxable_it * 0.23 - 63.6
-        else:
-            it_raw = taxable_it * 0.33 - 153.6
-
-        div_credit_it = comprehensive_div_man * 0.10 if comprehensive_div_man > 0 else 0.0
-        div_credit_rt = comprehensive_div_man * 0.028 if comprehensive_div_man > 0 else 0.0
-
-        final_it = max(it_raw - div_credit_it, 0.0) * 1.021
-        final_rt = max(taxable_rt * 0.10 - div_credit_rt, 0.0) + (0.5 if total_inc > 45.0 else 0.0)
-        return round(final_it, 2), round(final_rt, 2)
-
     nhi_a_man, nhi_a_lbl = calc_nhi_premium_man(side_taxable_income_man, household_members, age_group)
     soc_a_man = nhi_a_man + nenkin_pay_man
     it_a_man, rt_a_man = calc_income_and_resident_tax(side_taxable_income_man, soc_a_man, other_ded_man, 0.0)
@@ -2812,9 +2820,12 @@ elif active_page == "7. 暴落分析":
                 cur_map = {row['投資スタイル']: row['評価額'] / 10000.0 for _, row in style_grp.iterrows()}
 
                 rc1, rc2, rc3 = st.columns(3)
-                t_c1 = rc1.number_input("目標：高配当系(%)", 0, 100, 40, step=5)
-                t_c2 = rc2.number_input("目標：インデックス系(%)", 0, 100, 50, step=5)
-                t_c3 = rc3.number_input("目標：個別株系(%)", 0, 100, 10, step=5)
+                t_c1 = rc1.number_input("目標：高配当系(%)", 0, 100, int(st.session_state["shared_reb_hd"]), step=5)
+                t_c2 = rc2.number_input("目標：インデックス系(%)", 0, 100, int(st.session_state["shared_reb_idx"]), step=5)
+                t_c3 = rc3.number_input("目標：個別株系(%)", 0, 100, int(st.session_state["shared_reb_stk"]), step=5)
+                st.session_state["shared_reb_hd"] = t_c1
+                st.session_state["shared_reb_idx"] = t_c2
+                st.session_state["shared_reb_stk"] = t_c3
                 targets = {'高配当系': t_c1, 'インデックス系': t_c2, '個別株系': t_c3}
             else:
                 class_grp = df_master.groupby('資産クラス', as_index=False)['評価額'].sum()
@@ -2866,3 +2877,774 @@ elif active_page == "7. 暴落分析":
                 '4%ルール月間取崩枠': fmt_man_or_sen(safe_4pct_yen)
             })
         st.table(pd.DataFrame(stress_rows))
+
+# ==============================================================================
+# 8. PDFレポート（全項目統合のエグゼクティブPDF出力）
+# ==============================================================================
+elif active_page == "8. PDFレポート":
+    st.subheader("📄 全項目統合 資産管理＆サイドFIRE 総合分析レポート（PDF出力）")
+    st.caption("メニュー1〜7のすべての分析・シミュレーション結果を1冊のA4総合レポートに統合し、文字化けのない高品質なPDFとして出力します。")
+
+    # --- 全項目の分析データを一括計算して総合レポートを組み立てる関数 ---
+    def build_comprehensive_report_html():
+        now_str = datetime.now(JST).strftime('%Y年%m月%d日 %H:%M')
+        total_pnl = current_total_valuation - current_total_cost
+        pnl_ratio = (total_pnl / current_total_cost * 100.0) if current_total_cost > 0 else 0.0
+        total_yield_pre = (current_annual_div_pre / current_total_valuation * 100.0) if current_total_valuation > 0 else 0.0
+        total_yield_post = (current_annual_div_post / current_total_valuation * 100.0) if current_total_valuation > 0 else 0.0
+
+        # 1. 新NISA枠集計
+        if not df_master.empty:
+            nisa_df = df_master[df_master['口座区分'] == 'NISA']
+            nisa_cost_yen = float(nisa_df['取得額'].sum())
+            nisa_val_yen = float(nisa_df['評価額'].sum())
+            nisa_pnl_yen = max(nisa_val_yen - nisa_cost_yen, 0.0)
+            nisa_div_yen = float(nisa_df['年間配当金(税引後)'].sum())
+        else:
+            nisa_cost_yen = nisa_val_yen = nisa_pnl_yen = nisa_div_yen = 0.0
+        nisa_saved_tax_gain = nisa_pnl_yen * 0.20315
+        nisa_saved_tax_div = nisa_div_yen * 0.20315
+        nisa_rem_yen = max(18000000.0 - nisa_cost_yen, 0.0)
+        nisa_prog_pct = min(nisa_cost_yen / 18000000.0 * 100.0, 100.0)
+
+        # 証券会社×口座区分集計表
+        if not df_master.empty:
+            acc_grp = df_master.groupby(['証券会社', '口座区分'], as_index=False)[['評価額', '取得額', '評価損益', '年間配当金(税引後)']].sum()
+            acc_rows_html = ""
+            for _, r in acc_grp.iterrows():
+                acc_rows_html += f"""
+                <tr>
+                    <td>{r['証券会社']}</td>
+                    <td>{r['口座区分']}</td>
+                    <td class="num">{fmt_man_or_sen(r['評価額'])} ({r['評価額']:,.0f}円)</td>
+                    <td class="num">{fmt_man_or_sen(r['取得額'])} ({r['取得額']:,.0f}円)</td>
+                    <td class="num">{fmt_man_or_sen(r['評価損益'], signed=True)}</td>
+                    <td class="num">{r['年間配当金(税引後)']:,.0f} 円</td>
+                </tr>
+                """
+        else:
+            acc_rows_html = "<tr><td colspan='6'>CSVデータ未取込（シミュレーション設定値による試算）</td></tr>"
+
+        # 2. 投資スタイル3区分集計
+        style_order = ['高配当系', 'インデックス系', '個別株系']
+        style_rows_html = ""
+        for s_cat in style_order:
+            if not df_master.empty:
+                sub_df = df_master[df_master['投資スタイル'] == s_cat]
+                cnt_s = len(sub_df)
+                val_s = float(sub_df['評価額'].sum())
+                cost_s = float(sub_df['取得額'].sum())
+                pnl_s = val_s - cost_s
+                share_s = (val_s / current_total_valuation * 100.0) if current_total_valuation > 0 else 0.0
+                div_pre_s = float(sub_df['年間配当金(税引前)'].sum())
+                div_post_s = float(sub_df['年間配当金(税引後)'].sum())
+                y_post_s = (div_post_s / val_s * 100.0) if val_s > 0 else 0.0
+            else:
+                cnt_s = 0
+                val_s = cost_s = pnl_s = share_s = div_pre_s = div_post_s = y_post_s = 0.0
+            style_rows_html += f"""
+            <tr>
+                <td><b>{s_cat}</b></td>
+                <td class="num">{cnt_s} 銘柄</td>
+                <td class="num">{fmt_man_or_sen(val_s)} ({val_s:,.0f}円)</td>
+                <td class="num">{share_s:.1f} %</td>
+                <td class="num">{fmt_man_or_sen(cost_s)}</td>
+                <td class="num">{fmt_man_or_sen(pnl_s, signed=True)}</td>
+                <td class="num">{div_pre_s:,.0f} 円</td>
+                <td class="num">{div_post_s:,.0f} 円</td>
+                <td class="num">{y_post_s:.2f} %</td>
+            </tr>
+            """
+        style_rows_html += f"""
+        <tr class="total-row">
+            <td>全資産 合計</td>
+            <td class="num">{len(df_master)} 銘柄</td>
+            <td class="num">{fmt_man_or_sen(current_total_valuation)} ({current_total_valuation:,.0f}円)</td>
+            <td class="num">100.0 %</td>
+            <td class="num">{fmt_man_or_sen(current_total_cost)}</td>
+            <td class="num">{fmt_man_or_sen(total_pnl, signed=True)}</td>
+            <td class="num">{current_annual_div_pre:,.0f} 円</td>
+            <td class="num">{current_annual_div_post:,.0f} 円</td>
+            <td class="num">{total_yield_post:.2f} %</td>
+        </tr>
+        """
+
+        # 3. 月別配当入金スケジュール（1〜12月） & 増配シミュレーション
+        month_totals_pre = {m: 0.0 for m in range(1, 13)}
+        month_totals_post = {m: 0.0 for m in range(1, 13)}
+        if not df_master.empty:
+            for _, row in df_master.iterrows():
+                a_pre = float(row['年間配当金(税引前)'])
+                a_post = float(row['年間配当金(税引後)'])
+                if a_post <= 0 and a_pre <= 0:
+                    continue
+                p_months = parse_pay_months_str(row.get('配当入金月', ''))
+                if not p_months:
+                    p_months = [6, 12]
+                for m_idx in p_months:
+                    month_totals_pre[m_idx] += a_pre / len(p_months)
+                    month_totals_post[m_idx] += a_post / len(p_months)
+
+        cal_headers_html = "".join([f"<th>{m}月</th>" for m in range(1, 13)]) + "<th>年間合計</th>"
+        cal_pre_cells = "".join([f"<td class='num'>{month_totals_pre[m]/10000.0:,.1f}万</td>" for m in range(1, 13)]) + f"<td class='num'><b>{current_annual_div_pre/10000.0:,.1f}万円</b></td>"
+        cal_post_cells = "".join([f"<td class='num'>{month_totals_post[m]/10000.0:,.1f}万</td>" for m in range(1, 13)]) + f"<td class='num'><b>{current_annual_div_post/10000.0:,.1f}万円</b></td>"
+
+        # 増配＆再投資（5, 10, 15, 20年後）
+        div_g_rate = float(st.session_state["shared_div_growth_rate"]) / 100.0
+        do_reinv = ("全額を再投資" in str(st.session_state["shared_reinvest_flag"]))
+        add_hd_man = int(st.session_state["shared_add_yearly_high_div"])
+        cur_y_post_dec = (total_yield_post / 100.0) if total_yield_post > 0 else 0.035
+        sim_div_y = current_annual_div_post
+        sim_cost_y = current_total_cost
+        drip_milestones_html = ""
+        for y_i in range(1, 21):
+            sim_div_y = sim_div_y * (1.0 + div_g_rate)
+            if do_reinv:
+                sim_div_y += sim_div_y * cur_y_post_dec
+            if add_hd_man > 0:
+                sim_cost_y += add_hd_man * 10000.0
+                sim_div_y += (add_hd_man * 10000.0) * cur_y_post_dec
+            if y_i in [1, 5, 10, 15, 20]:
+                yoc_f = (sim_div_y / sim_cost_y * 100.0) if sim_cost_y > 0 else 0.0
+                drip_milestones_html += f"""
+                <tr>
+                    <td>{y_i}年後 ({cur_year + y_i}年)</td>
+                    <td class="num">{fmt_man_or_sen(sim_div_y)} ({sim_div_y:,.0f} 円/年)</td>
+                    <td class="num">{sim_div_y/12:,.0f} 円/月</td>
+                    <td class="num">{yoc_f:.2f} %</td>
+                </tr>
+                """
+
+        # 4. 積立シミュレーション（1〜30年）
+        s_init = int(st.session_state["shared_sim_initial_man"])
+        s_month = int(st.session_state["shared_sim_monthly_man"])
+        s_rate = float(st.session_state["shared_sim_rate"])
+        m_r_sim = (s_rate / 100.0) / 12.0
+        b_sim = float(s_init)
+        p_sim = float(s_init)
+        tsumitate_rows_html = ""
+        for yr in range(1, 31):
+            prev_b = b_sim
+            for _ in range(12):
+                b_sim = b_sim * (1.0 + m_r_sim) + s_month
+                p_sim += s_month
+            prof_sim = b_sim - p_sim
+            gain_sim = b_sim - prev_b
+            if yr in [1, 3, 5, 10, 15, 20, 25, 30]:
+                tsumitate_rows_html += f"""
+                <tr class="{'highlight-row' if yr in [10, 20, 30] else ''}">
+                    <td>{yr}年目 ({cur_year + yr}年)</td>
+                    <td class="num">{fmt_man(p_sim)}</td>
+                    <td class="num">{fmt_man(prof_sim, signed=True)}</td>
+                    <td class="num"><b>{fmt_man(b_sim)}</b></td>
+                    <td class="num">{fmt_man(gain_sim, signed=True)}</td>
+                </tr>
+                """
+
+        # 5. サイドFIRE診断 & 5段階FIREロードマップ
+        f_init = int(st.session_state["shared_fire_init_man"])
+        f_yield = float(st.session_state["shared_fire_yield"])
+        f_save = int(st.session_state["shared_pre_fire_saving_man"])
+        f_inf = float(st.session_state["shared_inflation_rate"])
+        f_year = int(st.session_state["shared_fire_year"])
+        p_year = int(st.session_state["shared_pension_year"])
+        f_span = int(st.session_state["shared_sim_years_total"])
+        f_liv = int(st.session_state["shared_living_cost_man"])
+        f_side = int(st.session_state["shared_side_income_man"])
+        f_side_opt = st.session_state["shared_side_job_end_option"]
+        f_pen = int(st.session_state["shared_pension_man"])
+
+        df_f_rep, at_fire_rep, dep_y_rep = run_fire_simulation_yearly(
+            f_init, f_yield, f_save, f_inf, f_year, p_year, f_span, f_liv, f_side, f_side_opt, f_pen
+        )
+        if dep_y_rep is None and df_f_rep.iloc[-1]['年末資産残高(万円)'] >= at_fire_rep:
+            fire_verdict_str = f"【判定：大成功（余裕でサイドFIRE可能）】 {f_year}年にサイドFIREしても資産は一切枯渇せず増え続けます。"
+        elif dep_y_rep is None:
+            fire_verdict_str = f"【判定：サイドFIRE可能】 今後{f_span}年間（{cur_year + f_span}年まで）資産が枯渇せず維持できます。"
+        else:
+            fire_verdict_str = f"【判定：資金枯渇リスクあり】 {dep_y_rep}年頃に資産が枯渇する見込みです。"
+
+        years_to_pen = max(1, int(p_year - cur_year))
+        net_ret_need = max(f_liv - f_pen, 5) * 12 * 25
+        real_ret = max((f_yield - f_inf) / 100.0, 0.01)
+        t_coast = int(round(net_ret_need / ((1.0 + real_ret) ** years_to_pen)))
+        t_side = int(round(max(f_liv - f_side, 0) * 12 * 25))
+        eff_dy = min(max((current_annual_div_post / current_total_valuation) if current_total_valuation > 0 else 0.035, 0.03), 0.08)
+        t_div_side = int(round((max(f_liv - f_side, 0) * 12) / eff_dy))
+        t_lean = int(round((f_liv * 0.8) * 12 * 25))
+        t_full = int(round(f_liv * 12 * 25))
+
+        stages_rep = [
+            ('① コーストFIRE', t_coast, f'追加積立0円でも年金開始({p_year}年)時に老後資金が足りる状態'),
+            ('② サイドFIRE (4%基準)', t_side, f'資産4%取崩し＋副業(月{f_side}万)で生活費(月{f_liv}万)を賄う状態'),
+            ('③ 配当型サイドFIRE', t_div_side, f'元本取崩しゼロ！手取り配当＋副業収入だけで暮らせる状態'),
+            ('④ リーンFIRE', t_lean, f'副業なしで基礎生活費(月{f_liv*0.8:.0f}万)を4%取崩しで賄う状態'),
+            ('⑤ フルFIRE (完全FIRE)', t_full, f'副業なしで生活費(月{f_liv}万)をすべて4%取崩しで賄う状態'),
+        ]
+        stages_rows_html = ""
+        for s_title, s_targ, s_desc in stages_rep:
+            ach_pct = min(f_init / max(s_targ, 1) * 100.0, 100.0)
+            rem_m = max(s_targ - f_init, 0)
+            eta_s = estimate_years_to_target(f_init, s_targ, f_save, f_yield)
+            stages_rows_html += f"""
+            <tr>
+                <td><b>{s_title}</b></td>
+                <td>{s_desc}</td>
+                <td class="num">{fmt_man(s_targ)}</td>
+                <td class="num">{ach_pct:.1f} %</td>
+                <td class="num">{fmt_man(rem_m)}</td>
+                <td>{eta_s}</td>
+            </tr>
+            """
+
+        fire_cf_rows_html = ""
+        for idx_r, r_f in df_f_rep.iterrows():
+            y_n = idx_r + 1
+            if y_n in [1, 3, 5, 10, 15, 20, 25, 30, 35, 40, f_span] or r_f['西暦_数値'] in [f_year, p_year]:
+                fire_cf_rows_html += f"""
+                <tr>
+                    <td>{r_f['経過年数']} ({r_f['西暦']})</td>
+                    <td>{r_f['ステータス']}</td>
+                    <td class="num">{fmt_man(r_f['年間積立額(万円)'])}</td>
+                    <td class="num">{fmt_man(r_f['年間副業収入(万円)'])}</td>
+                    <td class="num">{fmt_man(r_f['年間年金収入(万円)'])}</td>
+                    <td class="num">{fmt_man(r_f['年間生活費(万円)'])}</td>
+                    <td class="num">{fmt_man(r_f['年間運用益(万円)'])}</td>
+                    <td class="num"><b>{fmt_man(r_f['年末資産残高(万円)'])}</b></td>
+                </tr>
+                """
+
+        # 6. モンテカルロ確率診断
+        mc_vol = float(st.session_state["shared_mc_volatility"])
+        mc_tr = int(st.session_state["shared_mc_trials"])
+        mc_sd = int(st.session_state["shared_mc_seed"])
+        rng_r = np.random.default_rng(mc_sd)
+        mu_a = f_yield / 100.0
+        sig_a = mc_vol / 100.0
+        dt_s = 1.0 / 12.0
+        dr_m = (mu_a - 0.5 * (sig_a ** 2)) * dt_s
+        vl_m = sig_a * np.sqrt(dt_s)
+        n_m_mc = f_span * 12
+        rz = rng_r.standard_normal((mc_tr, n_m_mc))
+        mgf = np.exp(dr_m + vl_m * rz)
+        bals_mc = np.full(mc_tr, float(f_init), dtype=np.float64)
+        ev_dep = np.zeros(mc_tr, dtype=bool)
+        y_paths_mc = np.zeros((mc_tr, f_span), dtype=np.float64)
+        y_dep_mc = np.zeros(f_span, dtype=np.float64)
+        m_inf_r = (f_inf / 100.0) / 12.0
+
+        for m in range(n_m_mc):
+            y_ic = m // 12
+            c_y = cur_year + y_ic + 1
+            is_f = (c_y >= f_year)
+            is_p = (c_y >= p_year)
+            adj_l = f_liv * ((1.0 + m_inf_r) ** m)
+            if not is_f:
+                cf_v = float(f_save)
+            else:
+                ys_f = c_y - f_year
+                act_s = True
+                if f_side_opt == "年金受給開始まで継続" and is_p:
+                    act_s = False
+                elif f_side_opt == "サイドFIRE後10年間のみ" and ys_f >= 10:
+                    act_s = False
+                elif f_side_opt == "サイドFIRE後15年間のみ" and ys_f >= 15:
+                    act_s = False
+                cf_v = (float(f_side) if act_s else 0.0) + (float(f_pen) if is_p else 0.0) - adj_l
+            act_m = ~ev_dep
+            bals_mc[act_m] = bals_mc[act_m] * mgf[act_m, m] + cf_v
+            ev_dep = ev_dep | (bals_mc <= 0.0)
+            bals_mc[ev_dep] = 0.0
+            if (m + 1) % 12 == 0:
+                y_paths_mc[:, y_ic] = bals_mc
+                y_dep_mc[y_ic] = np.mean(ev_dep) * 100.0
+
+        p10_r = np.percentile(y_paths_mc, 10, axis=0)
+        p25_r = np.percentile(y_paths_mc, 25, axis=0)
+        p50_r = np.percentile(y_paths_mc, 50, axis=0)
+        p75_r = np.percentile(y_paths_mc, 75, axis=0)
+        p90_r = np.percentile(y_paths_mc, 90, axis=0)
+        mc_succ_rate = 100.0 - y_dep_mc[-1]
+
+        mc_rows_html = ""
+        for y_i in range(f_span):
+            yn = y_i + 1
+            if yn in [5, 10, 15, 20, 25, 30, 35, 40, f_span]:
+                mc_rows_html += f"""
+                <tr>
+                    <td>{yn}年目 ({cur_year + yn}年)</td>
+                    <td class="num">{fmt_man(p10_r[y_i])}</td>
+                    <td class="num">{fmt_man(p25_r[y_i])}</td>
+                    <td class="num"><b>{fmt_man(p50_r[y_i])}</b></td>
+                    <td class="num">{fmt_man(p75_r[y_i])}</td>
+                    <td class="num">{fmt_man(p90_r[y_i])}</td>
+                    <td class="num"><b>{100.0 - y_dep_mc[y_i]:.1f} %</b></td>
+                </tr>
+                """
+
+        # 7. FIRE後の税金・社会保険料試算 & リバランス・暴落ストレステスト
+        nisa_d_m = round(float(df_master.loc[df_master['口座区分'] == 'NISA', '年間配当金(税引後)'].sum()) / 10000.0, 1) if not df_master.empty else 15.0
+        tok_jp_m = round(float(df_master.loc[(df_master['口座区分'] != 'NISA') & (df_master['資産クラス'] != '米国株・米国ETF'), '年間配当金(税引前)'].sum()) / 10000.0, 1) if not df_master.empty else 20.0
+        tok_us_m = round(float(df_master.loc[(df_master['口座区分'] != 'NISA') & (df_master['資産クラス'] == '米国株・米国ETF'), '年間配当金(税引前)'].sum()) * 0.90 / 10000.0, 1) if not df_master.empty else 10.0
+
+        net_side_c = float(f_side * 12)
+        side_tax_inc = max(net_side_c - 65.0, 0.0)
+        nhi_a, nhi_a_l = calc_nhi_premium_man(side_tax_inc, 1, "40歳〜64歳")
+        it_a, rt_a = calc_income_and_resident_tax(side_tax_inc, nhi_a + 21.0, 27.6, 0.0)
+        wh_a = round((tok_jp_m + tok_us_m) * 0.20315, 2)
+        burd_a = round(nhi_a + 21.0 + it_a + rt_a + wh_a, 1)
+
+        nhi_b, nhi_b_l = calc_nhi_premium_man(side_tax_inc + tok_jp_m, 1, "40歳〜64歳")
+        it_b, rt_b = calc_income_and_resident_tax(side_tax_inc, nhi_b + 21.0, 27.6, tok_jp_m)
+        wh_b = round(tok_us_m * 0.20315, 2)
+        burd_b = round(nhi_b + 21.0 + it_b + rt_b + wh_b, 1)
+
+        gross_tot = net_side_c + nisa_d_m + tok_jp_m + tok_us_m
+        take_a = round(gross_tot - burd_a, 1)
+        take_b = round(gross_tot - burd_b, 1)
+
+        # 暴落ストレステスト行
+        stress_rows_html = ""
+        cost_m_ex = current_total_cost / 10000.0
+        tot_m_ex = current_total_valuation / 10000.0
+        for drop in [-10, -20, -30, -40, -50]:
+            st_m = tot_m_ex * (1.0 + drop / 100.0)
+            st_pnl = st_m - cost_m_ex
+            s_4p = (st_m * 10000.0 * 0.04) / 12.0
+            stress_rows_html += f"""
+            <tr>
+                <td>株価 {drop}% 下落</td>
+                <td class="num">{fmt_man(st_m)}</td>
+                <td class="num">{fmt_man(st_pnl, signed=True)}</td>
+                <td class="num">{fmt_man_or_sen(s_4p)}/月</td>
+            </tr>
+            """
+
+        # 8. 全保有銘柄明細テーブル
+        holdings_rows_html = ""
+        if not df_master.empty:
+            for _, r in df_master.sort_values('評価額', ascending=False).iterrows():
+                holdings_rows_html += f"""
+                <tr>
+                    <td>{r['証券会社']}</td>
+                    <td>{r['口座区分']}</td>
+                    <td>{r['投資スタイル']}</td>
+                    <td>{r['銘柄コード']}</td>
+                    <td>{r['銘柄名']}</td>
+                    <td class="num">{r['保有数量']:,.0f}</td>
+                    <td class="num">{r['評価額']:,.0f} 円</td>
+                    <td class="num">{r['取得額']:,.0f} 円</td>
+                    <td class="num">{r['評価損益']:+,.0f} 円</td>
+                    <td class="num">{r['1株配当(円)']:,.2f} 円</td>
+                    <td class="num">{r['年間配当金(税引前)']:,.0f} 円</td>
+                    <td class="num"><b>{r['年間配当金(税引後)']:,.0f} 円</b></td>
+                    <td class="num">{r['実質配当利回り(税引後%)']:.2f} %</td>
+                </tr>
+                """
+        else:
+            holdings_rows_html = "<tr><td colspan='13'>保有銘柄CSVがアップロードされていません</td></tr>"
+
+        html_doc = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>資産管理＆サイドFIRE 総合分析レポート</title>
+<style>
+    @page {{
+        size: A4 portrait;
+        margin: 12mm;
+    }}
+    body {{
+        font-family: "Hiragino Kaku Gothic ProN", "Hiragino Sans", "Meiryo", "Yu Gothic", sans-serif;
+        color: #1e293b;
+        background: #ffffff;
+        line-height: 1.45;
+        font-size: 11px;
+        margin: 0;
+        padding: 0;
+    }}
+    .report-container {{
+        max-width: 210mm;
+        margin: 0 auto;
+        padding: 10px 16px;
+    }}
+    .report-header {{
+        border-bottom: 3px solid #0f172a;
+        padding-bottom: 10px;
+        margin-bottom: 14px;
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-end;
+    }}
+    .report-title {{
+        font-size: 20px;
+        font-weight: 800;
+        color: #0f172a;
+        margin: 0;
+    }}
+    .report-meta {{
+        font-size: 10.5px;
+        color: #475569;
+        text-align: right;
+    }}
+    .sec-title {{
+        font-size: 13.5px;
+        font-weight: 700;
+        color: #ffffff;
+        background: linear-gradient(90deg, #1e3a8a, #2563eb);
+        padding: 5px 10px;
+        border-radius: 4px;
+        margin-top: 16px;
+        margin-bottom: 8px;
+    }}
+    .kpi-grid {{
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 8px;
+        margin-bottom: 10px;
+    }}
+    .kpi-card {{
+        border: 1px solid #cbd5e1;
+        border-radius: 6px;
+        padding: 7px 9px;
+        background: #f8fafc;
+    }}
+    .kpi-label {{
+        font-size: 9.5px;
+        color: #475569;
+        font-weight: 600;
+    }}
+    .kpi-val {{
+        font-size: 14.5px;
+        font-weight: 800;
+        color: #0f172a;
+        margin: 2px 0;
+    }}
+    .kpi-sub {{
+        font-size: 9px;
+        color: #059669;
+    }}
+    table {{
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 10px;
+        font-size: 10px;
+    }}
+    th, td {{
+        border: 1px solid #cbd5e1;
+        padding: 4px 6px;
+        text-align: left;
+    }}
+    th {{
+        background-color: #f1f5f9;
+        font-weight: 700;
+        color: #1e293b;
+    }}
+    td.num {{
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+    }}
+    tr.total-row {{
+        background-color: #e0f2fe;
+        font-weight: 700;
+    }}
+    tr.highlight-row {{
+        background-color: #ecfdf5;
+    }}
+    .verdict-box {{
+        background: #f0fdf4;
+        border: 1px solid #86efac;
+        border-left: 5px solid #16a34a;
+        padding: 8px 12px;
+        border-radius: 4px;
+        font-weight: 700;
+        margin-bottom: 10px;
+    }}
+    .two-col {{
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+    }}
+    .page-break {{
+        page-break-before: always;
+    }}
+    .no-print-bar {{
+        background: #0f172a;
+        color: #fff;
+        padding: 10px 16px;
+        border-radius: 8px;
+        margin-bottom: 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+    }}
+    .print-btn {{
+        background: #10b981;
+        color: #fff;
+        border: none;
+        padding: 8px 18px;
+        border-radius: 6px;
+        font-weight: 700;
+        cursor: pointer;
+        font-size: 13px;
+    }}
+    @media print {{
+        .no-print-bar {{
+            display: none !important;
+        }}
+        .report-container {{
+            max-width: 100%;
+            padding: 0;
+        }}
+    }}
+</style>
+</head>
+<body>
+<div class="report-container">
+    <div class="no-print-bar">
+        <div>🖨️ <b>総合分析レポート プレビュー</b>（右のボタンを押して、送信先で「PDFに保存」を選択してください）</div>
+        <button class="print-btn" onclick="window.print()">📄 このレポートをPDFとして保存 / 印刷</button>
+    </div>
+
+    <div class="report-header">
+        <div>
+            <h1 class="report-title">💎 資産管理 ＆ サイドFIRE 総合分析レポート</h1>
+            <div style="font-size:11px; color:#334155; margin-top:3px;">楽天証券・SBI証券 ポートフォリオ統合診断 ／ 全項目エグゼクティブサマリー</div>
+        </div>
+        <div class="report-meta">
+            レポート発行日時：{now_str}<br>
+            計算基準為替レート：1ドル ＝ {current_usdjpy:.2f} 円
+        </div>
+    </div>
+
+    <!-- 第1章 -->
+    <div class="sec-title">1. 総資産サマリー ＆ 新NISA（1,800万円枠）消化・節税診断</div>
+    <div class="kpi-grid">
+        <div class="kpi-card">
+            <div class="kpi-label">総資産額（現時点評価額）</div>
+            <div class="kpi-val">{fmt_man_or_sen(current_total_valuation)}</div>
+            <div class="kpi-sub">{current_total_valuation:,.0f} 円</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">投資元本（取得額合計）</div>
+            <div class="kpi-val">{fmt_man_or_sen(current_total_cost)}</div>
+            <div class="kpi-sub">{current_total_cost:,.0f} 円</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">トータル含み損益</div>
+            <div class="kpi-val">{fmt_man_or_sen(total_pnl, signed=True)}</div>
+            <div class="kpi-sub">{pnl_ratio:+.2f} % ({total_pnl:+,.0f} 円)</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">年間配当・分配金（税引前）</div>
+            <div class="kpi-val">{fmt_man_or_sen(current_annual_div_pre)}</div>
+            <div class="kpi-sub">{current_annual_div_pre:,.0f} 円 (利回り {total_yield_pre:.2f}%)</div>
+        </div>
+        <div class="kpi-card">
+            <div class="kpi-label">年間配当・分配金（税引後）</div>
+            <div class="kpi-val">{fmt_man_or_sen(current_annual_div_post)}</div>
+            <div class="kpi-sub">{current_annual_div_post:,.0f} 円 (利回り {total_yield_post:.2f}%)</div>
+        </div>
+    </div>
+
+    <div class="two-col">
+        <div>
+            <b>■ 新NISA 生涯非課税枠（1,800万円）消化状況</b>
+            <table>
+                <tr><th>項目</th><th class="num">金額・ステータス</th></tr>
+                <tr><td>NISA 投資元本（取得額）</td><td class="num"><b>{fmt_man_or_sen(nisa_cost_yen)}</b> ({nisa_cost_yen:,.0f}円 / 消化率 {nisa_prog_pct:.1f}%)</td></tr>
+                <tr><td>NISA 現時点評価額 / 非課税含み益</td><td class="num">{fmt_man_or_sen(nisa_val_yen)} (含み益 {fmt_man_or_sen(nisa_pnl_yen, signed=True)})</td></tr>
+                <tr><td>NISA 節税メリット額（含み益＋配当）</td><td class="num">含み益非課税 {nisa_saved_tax_gain:,.0f}円 ＋ 配当非課税 {nisa_saved_tax_div:,.0f}円/年</td></tr>
+                <tr><td>1,800万円枠 残り投資可能額</td><td class="num">{fmt_man_or_sen(nisa_rem_yen)} ({nisa_rem_yen:,.0f}円)</td></tr>
+            </table>
+        </div>
+        <div>
+            <b>■ 証券会社 × 口座区分別 資産内訳</b>
+            <table>
+                <thead><tr><th>証券会社</th><th>口座</th><th class="num">現時点評価額</th><th class="num">投資元本</th><th class="num">含み損益</th><th class="num">手取り配当</th></tr></thead>
+                <tbody>{acc_rows_html}</tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- 第2章 -->
+    <div class="sec-title">2. 高配当系・インデックス系・個別株系 アセットバランス全集計</div>
+    <table>
+        <thead>
+            <tr>
+                <th>アセット区分</th><th class="num">銘柄数</th><th class="num">現時点評価額</th><th class="num">構成比率</th>
+                <th class="num">投資元本</th><th class="num">含み損益</th><th class="num">年間配当(税引前)</th>
+                <th class="num">年間配当(税引後)</th><th class="num">実質利回り(税引後)</th>
+            </tr>
+        </thead>
+        <tbody>{style_rows_html}</tbody>
+    </table>
+
+    <!-- 第3章 -->
+    <div class="sec-title">3. 配当・分配金 月別入金スケジュール（1〜12月）＆ 将来増配シミュレーション</div>
+    <table>
+        <thead><tr><th>区分</th>{cal_headers_html}</tr></thead>
+        <tbody>
+            <tr><td><b>税引前（額面）</b></td>{cal_pre_cells}</tr>
+            <tr class="highlight-row"><td><b>税引後（手取り）</b></td>{cal_post_cells}</tr>
+        </tbody>
+    </table>
+
+    <b>■ 配当再投資 ＆ 増配（YOC成長）予測（想定増配率：年{st.session_state["shared_div_growth_rate"]:.1f}% ／ {st.session_state["shared_reinvest_flag"]}）</b>
+    <table>
+        <thead><tr><th>経過年（西暦）</th><th class="num">将来年間手取り配当金</th><th class="num">月換算手取り配当</th><th class="num">将来YOC（元本利回り）</th></tr></thead>
+        <tbody>{drip_milestones_html}</tbody>
+    </table>
+
+    <!-- 第4章 -->
+    <div class="sec-title">4. 積立投資 将来資産シミュレーション（初期資産：{fmt_man(s_init)} ／ 毎月積立：{s_month}万円 ／ 想定利回り：年{s_rate:.1f}%）</div>
+    <table>
+        <thead><tr><th>経過年数（西暦）</th><th class="num">投資元本合計</th><th class="num">複利運用益合計</th><th class="num">総資産想定額</th><th class="num">年間資産増加額</th></tr></thead>
+        <tbody>{tsumitate_rows_html}</tbody>
+    </table>
+
+    <div class="page-break"></div>
+
+    <!-- 第5章 -->
+    <div class="sec-title">5. サイドFIRE 実現可能性診断 ＆ 5段階FIREステージ到達ロードマップ</div>
+    <div class="verdict-box">{fire_verdict_str}</div>
+    <div style="font-size:10px; margin-bottom:6px;">
+        【前提条件】初期資産：{fmt_man(f_init)} ／ 想定利回り：年{f_yield:.1f}% ／ インフレ率：年{f_inf:.1f}% ／ FIRE予定：{f_year}年 ／ 年金開始：{p_year}年（月{f_pen}万円） ／ 想定生活費：月{f_liv}万円 ／ 副業収入：月{f_side}万円（{f_side_opt}）
+    </div>
+    <table>
+        <thead><tr><th>FIREステージ</th><th>定義・状態</th><th class="num">必要目標資産</th><th class="num">現在達成率</th><th class="num">あと必要額</th><th>到達予想時期</th></tr></thead>
+        <tbody>{stages_rows_html}</tbody>
+    </table>
+
+    <b>■ サイドFIRE 長期キャッシュフロー ＆ 年末資産残高推移（抜粋）</b>
+    <table>
+        <thead>
+            <tr>
+                <th>経過年（西暦）</th><th>ステータス</th><th class="num">年間積立額</th><th class="num">年間副業収入</th>
+                <th class="num">年間年金収入</th><th class="num">年間生活費</th><th class="num">年間運用益</th><th class="num">年末資産残高</th>
+            </tr>
+        </thead>
+        <tbody>{fire_cf_rows_html}</tbody>
+    </table>
+
+    <!-- 第6章 -->
+    <div class="sec-title">6. モンテカルロ確率診断（試行回数：{mc_tr:,}回 ／ 期待リターン：{f_yield:.1f}% ／ ボラティリティ：{mc_vol:.1f}%）</div>
+    <div class="verdict-box">
+        🎲 {f_span}年後（{cur_year + f_span}年）までのサイドFIRE成功確率（資産維持率）：<b>{mc_succ_rate:.1f} %</b> （累積枯渇確率：{100.0 - mc_succ_rate:.1f} %）
+    </div>
+    <table>
+        <thead>
+            <tr>
+                <th>経過年（西暦）</th><th class="num">下位10%（悲観）</th><th class="num">下位25%（やや不調）</th>
+                <th class="num">中央値（標準50%）</th><th class="num">上位25%（やや好調）</th><th class="num">上位10%（好調）</th><th class="num">資産維持率</th>
+            </tr>
+        </thead>
+        <tbody>{mc_rows_html}</tbody>
+    </table>
+
+    <!-- 第7章 -->
+    <div class="sec-title">7. サイドFIRE後の税金・国保・年金試算 ＆ 暴落ストレステスト</div>
+    <div class="two-col">
+        <div>
+            <b>■ 申告方式別 税金・国保・真の手取り比較（年額）</b>
+            <table>
+                <thead><tr><th>申告方式</th><th class="num">国保＋年金</th><th class="num">税・源泉負担</th><th class="num">真の手取り年額(月額)</th></tr></thead>
+                <tbody>
+                    <tr>
+                        <td>① 申告不要（源泉徴収完結）</td>
+                        <td class="num">{nhi_a + 21.0:,.1f} 万円</td>
+                        <td class="num">{it_a + rt_a + wh_a:,.1f} 万円</td>
+                        <td class="num"><b>{take_a:,.1f} 万円</b> (月{take_a/12:,.1f}万)</td>
+                    </tr>
+                    <tr>
+                        <td>② 総合課税で確定申告</td>
+                        <td class="num">{nhi_b + 21.0:,.1f} 万円</td>
+                        <td class="num">{it_b + rt_b + wh_b:,.1f} 万円</td>
+                        <td class="num"><b>{take_b:,.1f} 万円</b> (月{take_b/12:,.1f}万)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        <div>
+            <b>■ 株価暴落ストレステスト（現在資産基準）</b>
+            <table>
+                <thead><tr><th>暴落シナリオ</th><th class="num">暴落後の総資産額</th><th class="num">暴落後の含み損益</th><th class="num">4%ルール月間取崩枠</th></tr></thead>
+                <tbody>{stress_rows_html}</tbody>
+            </table>
+        </div>
+    </div>
+
+    <div class="page-break"></div>
+
+    <!-- 第8章 -->
+    <div class="sec-title">8. 全保有銘柄 明細・配当検算一覧（全 {len(df_master)} 銘柄）</div>
+    <table>
+        <thead>
+            <tr>
+                <th>証券会社</th><th>口座</th><th>スタイル</th><th>コード</th><th>銘柄名</th><th class="num">保有数量</th>
+                <th class="num">現時点評価額</th><th class="num">取得額</th><th class="num">評価損益</th>
+                <th class="num">1株/万口配当</th><th class="num">配当(税引前)</th><th class="num">配当(税引後)</th><th class="num">実質利回り</th>
+            </tr>
+        </thead>
+        <tbody>{holdings_rows_html}</tbody>
+    </table>
+</div>
+</body>
+</html>"""
+        return html_doc
+
+    report_html_str = build_comprehensive_report_html()
+    b64_report = urllib.parse.quote(report_html_str)
+
+    with st.container(border=True):
+        st.markdown("##### 🖨️ PDFレポートの発行・保存方法（2通り）")
+        btn_c1, btn_c2 = st.columns(2)
+
+        with btn_c1:
+            # ブラウザの印刷（PDF保存）ダイアログを直接開くJavaScriptボタン
+            components.html(
+                f"""
+                <html>
+                <body style="margin:0; padding:0;">
+                <button onclick="openPrintWin()" style="
+                    width:100%; background:linear-gradient(90deg, #10b981, #059669); color:white;
+                    border:none; padding:12px 18px; border-radius:8px; font-size:15px; font-weight:700;
+                    cursor:pointer; box-shadow:0 2px 5px rgba(0,0,0,0.15); font-family:sans-serif;">
+                    🖨️ ワンクリックでPDF出力画面を開く（推奨）
+                </button>
+                <script>
+                function openPrintWin() {{
+                    var htmlContent = decodeURIComponent("{b64_report}");
+                    var w = window.open('', '_blank');
+                    if (w) {{
+                        w.document.open();
+                        w.document.write(htmlContent);
+                        w.document.close();
+                        setTimeout(function() {{
+                            w.focus();
+                            w.print();
+                        }}, 500);
+                    }} else {{
+                        alert("ポップアップがブロックされました。右隣のダウンロードボタンから保存して開いてください。");
+                    }}
+                }}
+                </script>
+                </body>
+                </html>
+                """,
+                height=55
+            )
+            st.caption("※ボタンを押すとA4レイアウト画面が開き、そのまま『PDFに保存』できます。")
+
+        with btn_c2:
+            st.download_button(
+                label="💾 総合レポート（印刷最適化ファイル）をダウンロード保存",
+                data=report_html_str.encode('utf-8'),
+                file_name=f"asset_fire_report_{datetime.now(JST).strftime('%Y%m%d')}.html",
+                mime="text/html",
+                use_container_width=True
+            )
+            st.caption("※ダウンロードしたファイルをブラウザで開き、`Ctrl + P` でいつでもPDF化・保管できます。")
+
+    st.markdown("#### 📋 総合レポート 画面内プレビュー")
+    components.html(report_html_str, height=950, scrolling=True)
